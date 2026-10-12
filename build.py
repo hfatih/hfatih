@@ -1,0 +1,211 @@
+"""Draws the profile README's SVG cards from live GitHub data.
+
+Run locally with the GitHub CLI signed in, or in Actions with GITHUB_TOKEN set.
+Standard library only. Output goes to assets/; the header is seeded so it does not
+change from run to run.
+"""
+import json
+import os
+import random
+import subprocess
+import urllib.request
+from datetime import date
+from html import escape
+from pathlib import Path
+
+LOGIN = "hfatih"
+OUT = Path(__file__).parent / "assets"
+SANS = "'Segoe UI', system-ui, -apple-system, sans-serif"
+MONO = "ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace"
+SERIF = "Georgia, 'Times New Roman', serif"
+PINK, ROSE, TEXT, MUTED, LINE = "#f0abc5", "#e7a0b9", "#f5f5f6", "#a48a97", "#5a2a40"
+# Descriptions for repositories whose GitHub description is empty.
+FALLBACK = {"samanyolu3d": "Interactive 3D galaxy simulation and procedural galactic visualization in your browser."}
+
+QUERY = """query($login: String!) { user(login: $login) {
+  name
+  contributionsCollection { contributionCalendar { totalContributions
+    weeks { contributionDays { contributionCount date } } } }
+  repositories(first: 50, ownerAffiliations: OWNER, privacy: PUBLIC, isFork: false,
+               orderBy: {field: STARGAZERS, direction: DESC}) { nodes {
+    name description stargazerCount url pushedAt
+    primaryLanguage { name color }
+    languages(first: 10, orderBy: {field: SIZE, direction: DESC}) { edges { size node { name color } } } } } } }"""
+
+
+def fetch():
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:  # local run: let the GitHub CLI handle sign-in
+        out = subprocess.run(["gh", "api", "graphql", "-f", f"query={QUERY}", "-f", f"login={LOGIN}"], capture_output=True, text=True, check=True, encoding="utf-8")
+        return json.loads(out.stdout)["data"]["user"]
+    body = json.dumps({"query": QUERY, "variables": {"login": LOGIN}}).encode()
+    request = urllib.request.Request("https://api.github.com/graphql", body, {"Authorization": f"Bearer {token}", "User-Agent": LOGIN})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.load(response)["data"]["user"]
+
+
+def sparkle(x, y, size, fill=PINK, opacity=1.0, extra=""):
+    """Four-pointed star centred on (x, y)."""
+    w = max(0.6, size * 0.18)
+    d = f"M{x} {y - size}L{x + w} {y - w} {x + size} {y} {x + w} {y + w} {x} {y + size} {x - w} {y + w} {x - size} {y} {x - w} {y - w}Z"
+    return f'<path d="{d}" fill="{fill}" opacity="{opacity:.2f}"{extra}/>'
+
+
+def backdrop(width, height, seed, stars):
+    """Card background: burgundy night with a seeded scatter of faint stars."""
+    rng = random.Random(seed)
+    parts = [
+        f'<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1f1018"/><stop offset="1" stop-color="#130d14"/></linearGradient></defs>',
+        f'<rect x="0.5" y="0.5" width="{width - 1}" height="{height - 1}" rx="16" fill="url(#bg)" stroke="{LINE}"/>',
+    ]
+    for _ in range(stars):
+        x, y = round(rng.uniform(10, width - 10), 1), round(rng.uniform(10, height - 10), 1)
+        if rng.random() < 0.3:
+            parts.append(sparkle(x, y, round(rng.uniform(2, 5), 1), "#ffc3d7", rng.uniform(0.1, 0.28)))
+        else:
+            parts.append(f'<circle cx="{x}" cy="{y}" r="{rng.uniform(0.6, 1.4):.1f}" fill="#ffc3d7" opacity="{rng.uniform(0.1, 0.3):.2f}"/>')
+    return "".join(parts)
+
+
+def svg(name, width, height, body, label):
+    style = "<style>@keyframes tw{0%,100%{opacity:.25}50%{opacity:1}}.tw{animation:tw 3.2s ease-in-out infinite}@keyframes fall{0%{transform:translate(0,0);opacity:0}8%{opacity:.9}22%{transform:translate(-190px,95px);opacity:0}100%{opacity:0}}.fall{animation:fall 9s linear infinite}@media(prefers-reduced-motion:reduce){.tw,.fall{animation:none}}</style>"
+    text = f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="{escape(label)}">{style}{body}</svg>\n'
+    (OUT / name).write_text(text, encoding="utf-8", newline="\n")
+
+
+def wrap(text, limit, lines):
+    out, current = [], ""
+    for word in text.split():
+        if len(current) + len(word) + 1 > limit and current:
+            out.append(current)
+            current = word
+        else:
+            current = f"{current} {word}".strip()
+    out.append(current)
+    if len(out) > lines:
+        out = out[:lines]
+        out[-1] = out[-1][: limit - 1].rstrip(" ,.;") + "…"
+    return out
+
+
+def header(user, repos):
+    width, height = 840, 250
+    body = [backdrop(width, height, "header", 70)]
+    body.append(f'<g class="fall"><path d="M800 28l-46 23" stroke="#ffd3e0" stroke-width="1.4" stroke-linecap="round"/></g>')
+    body.append(f'<text x="40" y="62" font-family="{MONO}" font-size="12" letter-spacing="3" fill="{PINK}">HFATIH · GITHUB</text>')
+    body.append(f'<text x="38" y="128" font-family="{SANS}" font-size="54" font-weight="700" letter-spacing="-2" fill="{TEXT}">{escape(user["name"] or LOGIN)}</text>')
+    body.append(f'<text x="40" y="172" font-family="{SERIF}" font-size="27" font-style="italic" fill="{PINK}">desktop tools &amp; small universes.</text>')
+    body.append(f'<text x="40" y="212" font-family="{SANS}" font-size="13" fill="{MUTED}">Rust and TypeScript for Windows apps · WebGL for galaxies and black holes</text>')
+    # Constellation: one star per public repository, joined in order of stars.
+    spots = [(560, 150), (640, 74), (722, 118), (786, 196), (608, 208), (500, 92)]
+    stars = list(zip(spots, repos))
+    path = " ".join(f"{'M' if i == 0 else 'L'}{x} {y}" for i, ((x, y), _) in enumerate(stars))
+    body.append(f'<path d="{path}" fill="none" stroke="{ROSE}" stroke-width="1" stroke-dasharray="2 5" opacity=".55"/>')
+    for index, ((x, y), repo) in enumerate(stars):
+        size = 6 + min(6, repo["stargazerCount"] * 2)
+        body.append(f'<circle cx="{x}" cy="{y}" r="{size + 7}" fill="{PINK}" opacity=".07"/>')
+        body.append(sparkle(x, y, size, "#ffe1ea", 1, f' class="tw" style="animation-delay:{index * 0.7:.1f}s"'))
+        anchor, dx = ("end", -14) if x > 740 else ("start", 14)
+        body.append(f'<text x="{x + dx}" y="{y + 20}" text-anchor="{anchor}" font-family="{MONO}" font-size="10.5" fill="#d9bcc8">{escape(repo["name"])}</text>')
+    svg("header.svg", width, height, "".join(body), f"{user['name']}: desktop tools and small universes")
+
+
+def card(repo):
+    width, height = 412, 158
+    language = repo["primaryLanguage"] or {"name": "Other", "color": PINK}
+    body = [backdrop(width, height, repo["name"], 22)]
+    body.append(sparkle(34, 40, 9, language["color"] or PINK))
+    body.append(f'<text x="54" y="46" font-family="{SANS}" font-size="18" font-weight="700" fill="{TEXT}">{escape(repo["name"])}</text>')
+    description = repo["description"] or FALLBACK.get(repo["name"], "")
+    for row, line in enumerate(wrap(description, 54, 3)):
+        body.append(f'<text x="26" y="{76 + row * 19}" font-family="{SANS}" font-size="12.5" fill="#cdb9c3">{escape(line)}</text>')
+    body.append(f'<circle cx="31" cy="134" r="5" fill="{language["color"] or PINK}"/>')
+    body.append(f'<text x="43" y="138" font-family="{MONO}" font-size="11" fill="{MUTED}">{escape(language["name"])}</text>')
+    if repo["stargazerCount"]:
+        body.append(f'<text x="{width - 26}" y="138" text-anchor="end" font-family="{MONO}" font-size="11" fill="{PINK}">✦ {repo["stargazerCount"]}</text>')
+    svg(f"repo-{repo['name']}.svg", width, height, "".join(body), f"{repo['name']}: {description}")
+
+
+def sky(calendar):
+    """The contribution year as a night sky: a quiet day is a dim dot, a busy day a bright star."""
+    width, height = 840, 232
+    weeks = calendar["weeks"]
+    days = [day for week in weeks for day in week["contributionDays"]]
+    active = [day for day in days if day["contributionCount"]]
+    best = max(days, key=lambda day: day["contributionCount"])
+    peak = max(1, best["contributionCount"])
+    body = [backdrop(width, height, "sky", 0)]
+    body.append(f'<text x="28" y="38" font-family="{MONO}" font-size="12.5" fill="{TEXT}"><tspan fill="{PINK}">{LOGIN}@github</tspan> ~ $ ./observe --last-year</text>')
+    left, top, step = 30, 64, 14.6
+    month = None
+    for column, week in enumerate(weeks):
+        first = date.fromisoformat(week["contributionDays"][0]["date"])
+        if first.month != month and column < len(weeks) - 2:
+            month = first.month
+            body.append(f'<text x="{left + column * step:.1f}" y="{top + 7 * step + 12:.1f}" font-family="{MONO}" font-size="9.5" fill="{MUTED}">{first.strftime("%b")}</text>')
+        for day in week["contributionDays"]:
+            row = date.fromisoformat(day["date"]).isoweekday() % 7
+            x, y = round(left + column * step, 1), round(top + row * step, 1)
+            count = day["contributionCount"]
+            if count:
+                level = count / peak
+                body.append(sparkle(x, y, round(3.4 + 3.4 * level, 1), "#ffe1ea" if level > 0.5 else PINK, 0.55 + 0.45 * level))
+            else:
+                body.append(f'<circle cx="{x}" cy="{y}" r="1" fill="#ffc3d7" opacity=".18"/>')
+    stats = [
+        (calendar["totalContributions"], "contributions this year"),
+        (len(active), "nights observed"),
+        (best["contributionCount"], "brightest night" + (f" · {date.fromisoformat(best['date']).strftime('%b %d')}" if best["contributionCount"] else "")),
+    ]
+    for index, (value, caption) in enumerate(stats):
+        x = 30 + index * 268
+        body.append(f'<text x="{x}" y="{height - 20}" font-family="{SANS}" font-size="20" font-weight="700" fill="{TEXT}">{value}<tspan dx="8" font-family="{MONO}" font-size="10.5" font-weight="400" fill="{MUTED}">{escape(caption)}</tspan></text>')
+    svg("sky.svg", width, height, "".join(body), f"{calendar['totalContributions']} contributions in the last year")
+
+
+def languages(repos):
+    width, height = 840, 118
+    totals = {}
+    for repo in repos:
+        for edge in repo["languages"]["edges"]:
+            name = edge["node"]["name"]
+            size, _ = totals.get(name, (0, None))
+            totals[name] = (size + edge["size"], edge["node"]["color"] or PINK)
+    ranked = sorted(totals.items(), key=lambda item: -item[1][0])[:6]
+    total = sum(size for _, (size, _) in ranked) or 1
+    body = [backdrop(width, height, "languages", 26)]
+    body.append(f'<text x="28" y="36" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">WRITTEN IN</text>')
+    bar_left, bar_width, x = 28, width - 56, 28.0
+    body.append(f'<clipPath id="bar"><rect x="{bar_left}" y="50" width="{bar_width}" height="10" rx="5"/></clipPath><g clip-path="url(#bar)">')
+    for _, (size, color) in ranked:
+        span = bar_width * size / total
+        body.append(f'<rect x="{x:.1f}" y="50" width="{span + 0.5:.1f}" height="10" fill="{color}"/>')
+        x += span
+    body.append("</g>")
+    for index, (name, (size, color)) in enumerate(ranked):
+        x = 28 + index * 132
+        body.append(f'<circle cx="{x + 5}" cy="88" r="5" fill="{color}"/>')
+        body.append(f'<text x="{x + 17}" y="92" font-family="{SANS}" font-size="12" fill="{TEXT}">{escape(name)} <tspan font-family="{MONO}" font-size="10.5" fill="{MUTED}">{100 * size / total:.0f}%</tspan></text>')
+    svg("languages.svg", width, height, "".join(body), "Languages: " + ", ".join(name for name, _ in ranked))
+
+
+def main():
+    OUT.mkdir(exist_ok=True)
+    user = fetch()
+    repos = [repo for repo in user["repositories"]["nodes"] if repo["name"].lower() != LOGIN]
+    header(user, repos[:6])
+    for repo in repos:
+        card(repo)
+    sky(user["contributionsCollection"]["contributionCalendar"])
+    languages(repos)
+    # Keep the README's project grid in step with the repositories that exist.
+    readme = Path(__file__).parent / "README.md"
+    before, _, rest = readme.read_text(encoding="utf-8").partition("<!-- projects:start -->")
+    grid = "\n".join(f'<a href="{repo["url"]}"><img src="assets/repo-{repo["name"]}.svg" width="49.5%" alt="{escape(repo["name"])}"></a>' for repo in repos)
+    tail = rest.partition("<!-- projects:end -->")[2]
+    readme.write_text(f"{before}<!-- projects:start -->\n{grid}\n<!-- projects:end -->{tail}", encoding="utf-8", newline="\n")
+    print("drew", 3 + len(repos), "cards for", ", ".join(repo["name"] for repo in repos))
+
+
+if __name__ == "__main__":
+    main()
