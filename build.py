@@ -8,6 +8,7 @@ import json
 import math
 import os
 import random
+import re
 import subprocess
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
@@ -685,6 +686,101 @@ def spectra(repos):
     svg("spectra.svg", width, height, "".join(body), "Language mix per repository: " + "; ".join(f"{repo['name']}: " + ", ".join(edge["node"]["name"] for edge in repo["languages"]["edges"][:3]) for repo in shown), css)
 
 
+# Annual meteor showers: (month, day of the usual peak, name, meteors per hour at best).
+SHOWERS = [(1, 3, "Quadrantids", 110), (4, 22, "Lyrids", 18), (5, 6, "Eta Aquariids", 50), (8, 12, "Perseids", 100), (10, 21, "Orionids", 20), (11, 17, "Leonids", 15), (12, 14, "Geminids", 150), (12, 22, "Ursids", 10)]
+# The four turning points of the year, to the usual day.
+SEASONS = [(3, 20, "March equinox"), (6, 21, "June solstice"), (9, 22, "September equinox"), (12, 21, "December solstice")]
+
+
+def upcoming(events, today):
+    """The next (date, rest...) among yearly events given as (month, day, ...)."""
+    dated = [(date(year, month, day), *rest) for year in (today.year, today.year + 1) for month, day, *rest in events]
+    return min(event for event in dated if event[0] >= today)
+
+
+def meteors(today):
+    """Countdown to the next annual meteor shower."""
+    width, height = 412, 260
+    when, name, rate = upcoming(SHOWERS, today)
+    days = (when - today).days
+    body = [backdrop(width, height)]
+    body.append(f'<clipPath id="shower"><rect x="1" y="1" width="{width - 2}" height="{height - 2}" rx="15"/></clipPath><g clip-path="url(#shower)">')
+    for index, (x, y, length) in enumerate(((360, 30, 60), (300, 70, 44), (396, 96, 52), (250, 26, 36))):
+        body.append(f'<g class="streak" style="animation-delay:-{index * 1.3:.1f}s;animation-duration:{4.6 + index * 0.9:.1f}s"><path d="M{x} {y}l-{length} {length * 0.55:.0f}" stroke="url(#tail)" stroke-width="1.6" stroke-linecap="round"/></g>')
+    body.append("</g>")
+    body.insert(1, f'<defs><linearGradient id="tail" x1="1" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff3f7" stop-opacity="0"/><stop offset="1" stop-color="#fff3f7"/></linearGradient></defs>')
+    body.append(f'<text x="26" y="38" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">NEXT METEOR SHOWER</text>')
+    body.append(f'<text x="26" y="118" font-family="{SERIF}" font-size="30" font-style="italic" fill="{TEXT}">{name}</text>')
+    countdown = "tonight" if days == 0 else "tomorrow" if days == 1 else f"in {days} days"
+    body.append(f'<text x="26" y="152" font-family="{SANS}" font-size="20" font-weight="700" fill="{TEXT}">{countdown}</text>')
+    body.append(f'<text x="26" y="{height - 34}" font-family="{SANS}" font-size="11" fill="{MUTED}">Peaks around {when.strftime("%B")} {when.day}, with up to</text><text x="26" y="{height - 20}" font-family="{SANS}" font-size="11" fill="{MUTED}">about {rate} meteors an hour under a dark sky.</text>')
+    css = "@keyframes streak{0%{transform:translate(70px,-38px);opacity:0}10%{opacity:1}34%{transform:translate(-150px,82px);opacity:0}100%{transform:translate(-150px,82px);opacity:0}}.streak{animation:streak linear infinite}@media(prefers-reduced-motion:reduce){.streak{animation:none}}"
+    svg("meteors.svg", width, height, "".join(body), f"Next meteor shower: {name}, {countdown}, peaking around {when.strftime('%B')} {when.day}", css)
+
+
+def earth(today):
+    """Where the Earth is on its way round the Sun today."""
+    width, height = 412, 260
+    cx, cy, radius = 298, 132, 78
+    start = date(today.year, 1, 1)
+    length = (date(today.year + 1, 1, 1) - start).days
+    day = (today - start).days + 1
+
+    def spot(day_of_year, distance=radius):
+        angle = math.radians(day_of_year / length * 360 - 90)
+        return round(cx + distance * math.cos(angle), 1), round(cy + distance * math.sin(angle), 1)
+
+    body = [backdrop(width, height)]
+    body.append(f'<text x="26" y="38" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">THIS ORBIT</text>')
+    body.append(f'<circle cx="{cx}" cy="{cy}" r="{radius}" fill="none" stroke="{PINK}" stroke-opacity=".28"/>')
+    ex, ey = spot(day)
+    sweep = f"M{cx} {cy - radius}A{radius} {radius} 0 {1 if day / length > 0.5 else 0} 1 {ex} {ey}"
+    body.append(f'<path d="{sweep}" fill="none" stroke="#ffe1ea" stroke-width="2" stroke-linecap="round"/>')
+    for month, dom, label in SEASONS:
+        mx, my = spot((date(today.year, month, dom) - start).days + 1)
+        lx, ly = spot((date(today.year, month, dom) - start).days + 1, radius + 15)
+        body.append(f'<circle cx="{mx}" cy="{my}" r="2.6" fill="{PINK}"/><text x="{lx}" y="{ly + 3}" text-anchor="middle" font-family="{MONO}" font-size="8.5" fill="{MUTED}">{label[:3].upper()}</text>')
+    body.append(f'<circle cx="{cx}" cy="{cy}" r="15" fill="{PINK}" opacity=".1"/>' + sparkle(cx, cy, 10, "#ffe1ea", 1, ' class="tw"'))
+    body.append(f'<circle cx="{ex}" cy="{ey}" r="6.5" fill="#8fb7ff"/><path d="M{ex - 4} {ey - 1}q3 -4 6 -1q-2 4 -6 1z" fill="#7fd6a4"/>')
+    body.append(f'<g class="spin" style="transform-origin:{ex}px {ey}px;animation-duration:6s"><circle cx="{ex + 13}" cy="{ey}" r="2" fill="#e9d3dc"/></g>')
+    when, label = upcoming(SEASONS, today)
+    body.append(f'<text x="26" y="112" font-family="{SANS}" font-size="34" font-weight="700" letter-spacing="-1" fill="{TEXT}">{day / length * 100:.0f}%</text>')
+    body.append(f'<text x="26" y="134" font-family="{MONO}" font-size="10.5" fill="{MUTED}">of {today.year}, day {day} of {length}</text>')
+    body.append(f'<text x="26" y="{height - 34}" font-family="{SANS}" font-size="11" fill="{MUTED}">{(when - today).days} days to the</text><text x="26" y="{height - 20}" font-family="{SANS}" font-size="11" fill="{MUTED}">{label}.</text>')
+    svg("earth.svg", width, height, "".join(body), f"Day {day} of {length}: {day / length * 100:.0f}% of {today.year}, {(when - today).days} days to the {label}")
+
+
+def cargo(repos):
+    """What recent commits were for, judged from keywords in each message."""
+    # Checked in order, so "Fix ... and add ..." counts as a fix and a README rewrite as docs.
+    kinds = [
+        ("docs", r"readme|\bdocs?\b|translat|screenshot"),
+        ("releases", r"release|initial|ilk commit|^v ?\d|installer"),
+        ("fixes", r"\bfix|düzelt|bug"),
+        ("features", r"\bfeat|\badd|\bkeep|\bmake|\buse\b|ekle|implement"),
+        ("upkeep", r"update|güncel|merge|refresh|refactor|simplify|default|chore|clean"),
+    ]
+    counts = {name: 0 for name, _ in kinds} | {"other": 0}
+    for _, _, message in all_commits(repos):
+        head = message.lower()
+        counts[next((name for name, pattern in kinds if re.search(pattern, head)), "other")] += 1
+    rows = [(name, count) for name, count in counts.items() if count]
+    rows.sort(key=lambda row: -row[1])
+    peak = max((count for _, count in rows), default=1)
+    width, height = 840, 66 + max(1, len(rows)) * 24
+    body = [backdrop(width, height)]
+    body.append(f'<text x="26" y="34" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">CARGO</text>')
+    body.append(f'<text x="{width - 28}" y="34" text-anchor="end" font-family="{SANS}" font-size="11" fill="{MUTED}">What the last {sum(counts.values())} commits carried, going by their messages.</text>')
+    for index, (name, count) in enumerate(rows):
+        y = 54 + index * 24
+        span = 560 * count / peak
+        body.append(f'<text x="28" y="{y + 10}" font-family="{MONO}" font-size="11.5" fill="{TEXT}">{name}</text>')
+        body.append(f'<rect class="load" x="150" y="{y}" width="{span:.1f}" height="12" rx="6" fill="{"#ffe1ea" if index == 0 else PINK}" opacity="{1 if index == 0 else 0.75 - index * 0.09:.2f}" style="transform-origin:150px {y + 6}px;animation-delay:{index * 0.18:.2f}s"/>')
+        body.append(f'<text x="{162 + span:.1f}" y="{y + 10}" font-family="{MONO}" font-size="11" fill="{MUTED}">{count}</text>')
+    css = "@keyframes load{0%{transform:scaleX(0)}18%,100%{transform:scaleX(1)}}.load{animation:load 9s cubic-bezier(.2,.8,.2,1) infinite}@media(prefers-reduced-motion:reduce){.load{animation:none}}"
+    svg("cargo.svg", width, height, "".join(body), "Recent commits by kind: " + ", ".join(f"{count} {name}" for name, count in rows), css)
+
+
 SYNODIC = 29.530588853
 PHASES = ["New moon", "Waxing crescent", "First quarter", "Waxing gibbous", "Full moon", "Waning gibbous", "Last quarter", "Waning crescent"]
 
@@ -774,13 +870,16 @@ def main():
     hours(repos)
     logbook(user, repos, now)
     spectra(repos)
+    meteors(now.date())
+    earth(now.date())
+    cargo(repos)
 
     name = NAME
     poster("sky-top.svg", [["header.svg"], ["terminal.svg"]], f"{name}: desktop tools and small universes. " + CARDS["terminal.svg"][4], round_top=True)
     cards = [f"repo-{repo['name']}.svg" for repo in repos]
     rows = [cards[index:index + 2] for index in range(0, len(cards), 2)]
-    rows += [["orbits.svg", "moon.svg"], ["galaxy.svg", "signal.svg"], ["blackhole.svg", "radar.svg"], ["hours.svg", "logbook.svg"]]
-    rows += [[key] for key in ("mission.svg", "milestones.svg", "sky.svg", "launches.svg", "ticker.svg", "languages.svg", "spectra.svg", "toolkit.svg", "aurora.svg")]
+    rows += [["orbits.svg", "moon.svg"], ["galaxy.svg", "signal.svg"], ["blackhole.svg", "radar.svg"], ["hours.svg", "logbook.svg"], ["earth.svg", "meteors.svg"]]
+    rows += [[key] for key in ("mission.svg", "milestones.svg", "sky.svg", "launches.svg", "ticker.svg", "cargo.svg", "languages.svg", "spectra.svg", "toolkit.svg", "aurora.svg")]
     poster("sky-main.svg", rows, ". ".join(CARDS[key][4] for row in rows for key in row), round_bottom=True)
 
     # The menu carries the links, since a poster is a single image. One button per repository, added automatically.
