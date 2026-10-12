@@ -4,6 +4,7 @@ Run locally with the GitHub CLI signed in, or in Actions with GITHUB_TOKEN set.
 Standard library only. Output goes to assets/; the header is seeded so it does not
 change from run to run.
 """
+import hashlib
 import json
 import math
 import os
@@ -134,8 +135,16 @@ def svg(name, width, height, body, label, css=""):
 
 
 def write(name, width, height, body, label, css=""):
+    """Writes one image under a name that carries a hash of its drawing, and returns that name.
+
+    GitHub caches README images by address, so a file that kept its name could go on showing an
+    old drawing for hours; a menu slice drawn at an old width then no longer fits its new share of
+    the row. A new name for every new drawing means the page always loads the current one.
+    """
     text = f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="{escape(label)}"><style>{BASE_CSS}{css}</style>{body}</svg>\n'
-    (OUT / name).write_text(text, encoding="utf-8", newline="\n")
+    file = f"{name.removesuffix('.svg')}-{hashlib.sha1(text.encode()).hexdigest()[:10]}.svg"
+    (OUT / file).write_text(text, encoding="utf-8", newline="\n")
+    return file
 
 
 def night(width, height, seed, nebulae=True):
@@ -181,7 +190,7 @@ def poster(name, rows, label, round_top=False, round_bottom=False):
     t, b = (22 if round_top else 0), (22 if round_bottom else 0)
     outline = f"M0 {t}Q0 0 {t} 0H{width - t}Q{width} 0 {width} {t}V{height - b}Q{width} {height} {width - b} {height}H{b}Q0 {height} 0 {height - b}Z"
     body = f'<clipPath id="page"><path d="{outline}"/></clipPath><g clip-path="url(#page)">{night(width, height, name)}</g>' + "".join(placed)
-    write(name, width, height, body, label, "".join(css))
+    return write(name, width, height, body, label, "".join(css))
 
 
 def button(text, primary):
@@ -228,10 +237,9 @@ def menu(links):
         shares[-1] = round(99.98 - sum(shares[:-1]), 2)
         for i, ((text, url, width, body), share) in enumerate(zip(row, shares)):
             slice_width = round(total * share / 100, 2)
-            file = f"menu-{r}-{i}.svg"
             x = 8 + (edge if i == 0 else 0)
             inner = f'{night(round(slice_width) + 2, height, f"menu{r}{i}", nebulae=False)}<svg x="{x:.1f}" y="10" width="{width}" height="40" viewBox="0 0 {width} 40">{body}</svg>'
-            write(file, slice_width, height, inner, text, css)
+            file = write(f"menu-{r}-{i}.svg", slice_width, height, inner, text, css)
             html.append(f'<a href="{url}"><img src="assets/{file}" width="{share}%" align="top" alt="{escape(text)}"></a>')
     return "".join(html)
 
@@ -367,8 +375,8 @@ def card(repo, now):
         else:
             body.append(f'<circle cx="{x + 2}" cy="46" r="1.2" fill="{PINK}" opacity=".35"/>')
     total = sum(weeks)
-    body.append(f'<text x="{right}" y="62" text-anchor="end" font-family="{MONO}" font-size="9" fill="{MUTED}">{total}{"+" if total >= 100 else ""} commits · {PULSE_WEEKS} wk</text>')
-    svg(f"repo-{repo['name']}.svg", width, height, "".join(body), f"{repo['name']}: {description} {total} commits in the last {PULSE_WEEKS} weeks.")
+    body.append(f'<text x="{right}" y="62" text-anchor="end" font-family="{MONO}" font-size="9" fill="{MUTED}">{total}{"+" if total >= 100 else ""} commit{"" if total == 1 else "s"} · {PULSE_WEEKS} wk</text>')
+    svg(f"repo-{repo['name']}.svg", width, height, "".join(body), f"{repo['name']}: {description.rstrip('. ') + '. ' if description else ''}{total} commit{'' if total == 1 else 's'} in the last {PULSE_WEEKS} weeks")
 
 
 def pulse(repo, now):
@@ -1188,20 +1196,20 @@ def main():
     stargazers(repos)
 
     name = NAME
-    poster("sky-top.svg", [["header.svg"], ["terminal.svg"]], f"{name}: desktop tools and small universes. " + CARDS["terminal.svg"][4], round_top=True)
+    top = poster("sky-top.svg", [["header.svg"], ["terminal.svg"]], f"{name}: desktop tools and small universes. " + CARDS["terminal.svg"][4], round_top=True)
     cards = [f"repo-{repo['name']}.svg" for repo in repos]
     rows = [cards[index:index + 2] for index in range(0, len(cards), 2)]
     rows += [["orbits.svg", "moon.svg"], ["galaxy.svg", "signal.svg"], ["blackhole.svg", "radar.svg"], ["hours.svg", "logbook.svg"], ["earth.svg", "meteors.svg"], ["daylight.svg", "planets.svg"]]
     rows += [[key] for key in ("control.svg", "mission.svg", "milestones.svg", "sky.svg", "launches.svg", "trail.svg", "ticker.svg", "cargo.svg", "languages.svg", "spectra.svg", "toolkit.svg", "stargazers.svg", "aurora.svg")]
-    poster("sky-main.svg", rows, ". ".join(CARDS[key][4] for row in rows for key in row), round_bottom=True)
+    sky_main = poster("sky-main.svg", rows, ". ".join(CARDS[key][4].rstrip(". ") for row in rows for key in row), round_bottom=True)
 
     # The menu carries the links, since a poster is a single image. One button per repository, added automatically.
     links = [(DISCORD[0], DISCORD[1], True)] + [(repo["name"], repo["url"], False) for repo in repos]
     # One paragraph with no whitespace between the tags: any gap would let the page show through.
     readme = (
-        f'<p><img src="assets/sky-top.svg" width="100%" align="top" alt="{escape(name)}: desktop tools and small universes">'
+        f'<p><img src="assets/{top}" width="100%" align="top" alt="{escape(name)}: desktop tools and small universes">'
         f"{menu(links)}"
-        '<img src="assets/sky-main.svg" width="100%" align="top" alt="Projects, orbits, tonight\'s moon and planets, Istanbul daylight, a contribution galaxy, streaks, milestones, recent releases and commits, drawn as one night sky"></p>\n\n'
+        f'<img src="assets/{sky_main}" width="100%" align="top" alt="Projects, orbits, tonight\'s moon and planets, Istanbul daylight, a contribution galaxy, streaks, milestones, recent releases and commits, drawn as one night sky"></p>\n\n'
         '<sub>The sky and every button are SVGs drawn by <a href="build.py"><code>build.py</code></a> from the GitHub API and redrawn every three hours: a new repository gets its own card, planet, radar blip and menu button without any editing.</sub>\n'
     )
     (Path(__file__).parent / "README.md").write_text(readme, encoding="utf-8", newline="\n")
