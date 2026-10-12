@@ -40,21 +40,49 @@ QUERY = """query($login: String!) { user(login: $login) {
     name description stargazerCount forkCount url pushedAt createdAt
     defaultBranchRef { target { ... on Commit { history(first: 40) { nodes { messageHeadline committedDate } } } } }
     releases(first: 30, orderBy: {field: CREATED_AT, direction: DESC}) { totalCount nodes { tagName publishedAt } }
-    issues(states: OPEN) { totalCount } pullRequests(states: OPEN) { totalCount }
-    stargazers(last: 6) { edges { starredAt node { login } } }
     primaryLanguage { name color }
     languages(first: 10, orderBy: {field: SIZE, direction: DESC}) { edges { size node { name color } } } } } } }"""
+
+
+def api(path, accept="application/vnd.github+json"):
+    """One REST call: with the Actions token when there is one, otherwise through the GitHub CLI."""
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        out = subprocess.run(["gh", "api", "-H", f"Accept: {accept}", path], capture_output=True, text=True, check=True, encoding="utf-8")
+        return json.loads(out.stdout)
+    request = urllib.request.Request(f"https://api.github.com/{path}", headers={"Authorization": f"Bearer {token}", "Accept": accept, "User-Agent": LOGIN})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.load(response)
 
 
 def fetch():
     token = os.environ.get("GITHUB_TOKEN")
     if not token:  # local run: let the GitHub CLI handle sign-in
         out = subprocess.run(["gh", "api", "graphql", "-f", f"query={QUERY}", "-f", f"login={LOGIN}"], capture_output=True, text=True, check=True, encoding="utf-8")
-        return json.loads(out.stdout)["data"]["user"]
-    body = json.dumps({"query": QUERY, "variables": {"login": LOGIN}}).encode()
-    request = urllib.request.Request("https://api.github.com/graphql", body, {"Authorization": f"Bearer {token}", "User-Agent": LOGIN})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.load(response)["data"]["user"]
+        reply = json.loads(out.stdout)
+    else:
+        body = json.dumps({"query": QUERY, "variables": {"login": LOGIN}}).encode()
+        request = urllib.request.Request("https://api.github.com/graphql", body, {"Authorization": f"Bearer {token}", "User-Agent": LOGIN})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            reply = json.load(response)
+    if reply.get("errors"):
+        raise SystemExit(f"GitHub refused part of the query: {reply['errors']}")
+    user = reply["data"]["user"]
+    # Open issues, pull requests and stargazers come from the REST API: the Actions token may read
+    # them there for any public repository, but not through the GraphQL query above.
+    for repo in user["repositories"]["nodes"]:
+        base = f"repos/{LOGIN}/{repo['name']}"
+        try:
+            pulls = len(api(f"{base}/pulls?state=open&per_page=100"))
+            issues = api(base)["open_issues_count"] - pulls  # the count GitHub reports includes pull requests
+            fans = api(f"{base}/stargazers?per_page=100", "application/vnd.github.star+json")
+        except Exception as error:  # a missing extra must not take the whole page down
+            print("skipped extras for", repo["name"], "-", error)
+            pulls, issues, fans = 0, 0, []
+        repo["pullRequests"] = {"totalCount": pulls}
+        repo["issues"] = {"totalCount": max(issues, 0)}
+        repo["stargazers"] = {"edges": [{"starredAt": fan["starred_at"], "node": {"login": fan["user"]["login"]}} for fan in fans[-6:]]}
+    return user
 
 
 def sparkle(x, y, size, fill=PINK, opacity=1.0, extra=""):
