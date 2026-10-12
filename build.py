@@ -1,4 +1,4 @@
-"""Draws the profile README's SVG cards from live GitHub data.
+"""Draws the profile README from live GitHub data: two sky posters made of cards, plus link buttons.
 
 Run locally with the GitHub CLI signed in, or in Actions with GITHUB_TOKEN set.
 Standard library only. Output goes to assets/; the header is seeded so it does not
@@ -21,6 +21,10 @@ MONO = "ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace"
 SERIF = "Georgia, 'Times New Roman', serif"
 PINK, ROSE, TEXT, MUTED, LINE = "#f0abc5", "#e7a0b9", "#f5f5f6", "#a48a97", "#5a2a40"
 # Descriptions for repositories whose GitHub description is empty.
+# Shown as the first button. Everything else on the page comes from the GitHub API.
+DISCORD = "https://discord.gg/starlitv"
+# What the public repositories are built with, per their own READMEs.
+TOOLKIT = ["Rust", "TypeScript", "React", "Tauri 2", "SQLite", "WebGL 2", "GLSL", "Three.js", "C#", "Node.js"]
 FALLBACK = {"samanyolu3d": "Interactive 3D galaxy simulation and procedural galactic visualization in your browser."}
 
 QUERY = """query($login: String!) { user(login: $login) {
@@ -30,6 +34,7 @@ QUERY = """query($login: String!) { user(login: $login) {
   repositories(first: 50, ownerAffiliations: OWNER, privacy: PUBLIC, isFork: false,
                orderBy: {field: STARGAZERS, direction: DESC}) { nodes {
     name description stargazerCount forkCount url pushedAt
+    defaultBranchRef { target { ... on Commit { history(first: 4) { nodes { messageHeadline committedDate } } } } }
     releases(first: 1, orderBy: {field: CREATED_AT, direction: DESC}) { nodes { tagName publishedAt } }
     primaryLanguage { name color }
     languages(first: 10, orderBy: {field: SIZE, direction: DESC}) { edges { size node { name color } } } } } } }"""
@@ -53,27 +58,119 @@ def sparkle(x, y, size, fill=PINK, opacity=1.0, extra=""):
     return f'<path d="{d}" fill="{fill}" opacity="{opacity:.2f}"{extra}/>'
 
 
-def backdrop(width, height, seed, stars):
-    """Card background: burgundy night with a seeded scatter of faint stars."""
-    rng = random.Random(seed)
-    parts = [
-        f'<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1f1018"/><stop offset="1" stop-color="#130d14"/></linearGradient></defs>',
-        f'<rect x="0.5" y="0.5" width="{width - 1}" height="{height - 1}" rx="16" fill="url(#bg)" stroke="{LINE}"/>',
-    ]
-    for _ in range(stars):
-        x, y = round(rng.uniform(10, width - 10), 1), round(rng.uniform(10, height - 10), 1)
-        if rng.random() < 0.3:
-            parts.append(sparkle(x, y, round(rng.uniform(2, 5), 1), "#ffc3d7", rng.uniform(0.1, 0.28)))
-        else:
-            parts.append(f'<circle cx="{x}" cy="{y}" r="{rng.uniform(0.6, 1.4):.1f}" fill="#ffc3d7" opacity="{rng.uniform(0.1, 0.3):.2f}"/>')
-    return "".join(parts)
+BASE_CSS = "@keyframes tw{0%,100%{opacity:.25}50%{opacity:1}}.tw{animation:tw 3.2s ease-in-out infinite}@keyframes fall{0%{transform:translate(0,0);opacity:0}8%{opacity:.9}22%{transform:translate(-190px,95px);opacity:0}100%{opacity:0}}.fall{animation:fall 9s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.spin{animation:spin linear infinite}@media(prefers-reduced-motion:reduce){.tw,.fall,.spin{animation:none}}"
+CARDS = {}
+
+
+def backdrop(width, height, seed=None, stars=0):
+    """A card is a pane of glass: the poster's sky shows through it, so the cards read as one piece."""
+    return f'<rect x="0.5" y="0.5" width="{width - 1}" height="{height - 1}" rx="16" fill="#ffffff" fill-opacity=".035" stroke="{PINK}" stroke-opacity=".2"/>'
 
 
 def svg(name, width, height, body, label, css=""):
-    style = "<style>@keyframes tw{0%,100%{opacity:.25}50%{opacity:1}}.tw{animation:tw 3.2s ease-in-out infinite}@keyframes fall{0%{transform:translate(0,0);opacity:0}8%{opacity:.9}22%{transform:translate(-190px,95px);opacity:0}100%{opacity:0}}.fall{animation:fall 9s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.spin{animation:spin linear infinite}@media(prefers-reduced-motion:reduce){.tw,.fall,.spin{animation:none}}</style>"
-    extra = f"<style>{css}</style>" if css else ""
-    text = f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="{escape(label)}">{style}{extra}{body}</svg>\n'
+    """Registers a finished card; posters place it later."""
+    CARDS[name] = (width, height, body, css, label)
+
+
+def write(name, width, height, body, label, css=""):
+    text = f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="{escape(label)}"><style>{BASE_CSS}{css}</style>{body}</svg>\n'
     (OUT / name).write_text(text, encoding="utf-8", newline="\n")
+
+
+def poster(name, rows, label):
+    """Lays cards out in rows on one continuous night sky and writes it as a single image.
+
+    Each card sits in its own nested <svg>, which keeps the pixel transform origins its
+    animations use relative to the card instead of the whole poster.
+    """
+    pad, gap = 24, 16
+    width = 840 + 2 * pad
+    y, placed, css = pad, [], []
+    for row in rows:
+        x, tallest = pad, 0
+        for key in row:
+            w, h, body, extra, _ = CARDS[key]
+            placed.append(f'<svg x="{x}" y="{y}" width="{w}" height="{h}" viewBox="0 0 {w} {h}">{body}</svg>')
+            css.append(extra)
+            x += w + gap
+            tallest = max(tallest, h)
+        y += tallest + gap
+    height = y - gap + pad
+    rng = random.Random(name)
+    sky = [
+        f'<defs><linearGradient id="night" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1c0d18"/><stop offset=".5" stop-color="#160a15"/><stop offset="1" stop-color="#0f0711"/></linearGradient>'
+        f'<radialGradient id="rose"><stop offset="0" stop-color="#b7466c" stop-opacity=".34"/><stop offset="1" stop-color="#b7466c" stop-opacity="0"/></radialGradient>'
+        f'<radialGradient id="violet"><stop offset="0" stop-color="#644d8e" stop-opacity=".3"/><stop offset="1" stop-color="#644d8e" stop-opacity="0"/></radialGradient>'
+        f'<clipPath id="page"><rect width="{width}" height="{height}" rx="22"/></clipPath></defs>',
+        f'<g clip-path="url(#page)"><rect width="{width}" height="{height}" fill="url(#night)"/>',
+    ]
+    # Drifts of nebula down the page, alternating sides, so no two cards share the same patch of sky.
+    for index, top in enumerate(range(60, height + 200, 430)):
+        left = index % 2 == 0
+        sky.append(f'<ellipse cx="{rng.uniform(60, 300) if left else rng.uniform(580, 830):.0f}" cy="{top + rng.uniform(-60, 60):.0f}" rx="{rng.uniform(300, 420):.0f}" ry="{rng.uniform(190, 260):.0f}" fill="url(#{"rose" if index % 3 else "violet"})"/>')
+    for index in range(int(width * height / 2100)):
+        x, yy = round(rng.uniform(4, width - 4), 1), round(rng.uniform(4, height - 4), 1)
+        twinkle = f' class="tw" style="animation-delay:-{index % 13 * 0.5:.1f}s"' if index % 9 == 0 else ""
+        if rng.random() < 0.26:
+            sky.append(sparkle(x, yy, round(rng.uniform(2, 5.5), 1), "#ffc3d7", rng.uniform(0.14, 0.4), twinkle))
+        else:
+            sky.append(f'<circle cx="{x}" cy="{yy}" r="{rng.uniform(0.5, 1.4):.1f}" fill="#ffc3d7" opacity="{rng.uniform(0.14, 0.42):.2f}"{twinkle}/>')
+    sky.append(f'</g><rect x="0.5" y="0.5" width="{width - 1}" height="{height - 1}" rx="22" fill="none" stroke="{LINE}"/>')
+    write(name, width, height, "".join(sky) + "".join(placed), label, "".join(css))
+
+
+def button(name, text, primary):
+    """A link button: filled pink for the main one, glass for the rest."""
+    width, height = round(len(text) * 7.6 + 58), 40
+    if primary:
+        shape = f'<defs><linearGradient id="fill" x1="0" x2="1"><stop offset="0" stop-color="#ffd3e0"/><stop offset="1" stop-color="{ROSE}"/></linearGradient><clipPath id="pill"><rect width="{width}" height="{height}" rx="20"/></clipPath></defs><rect width="{width}" height="{height}" rx="20" fill="url(#fill)"/><g clip-path="url(#pill)"><rect class="shine" x="-40" y="0" width="26" height="{height}" fill="#fff" opacity=".45" transform="skewX(-20)"/></g>'
+        ink, star = "#24121c", "#8e3a5b"
+    else:
+        shape = f'<rect x="0.5" y="0.5" width="{width - 1}" height="{height - 1}" rx="19.5" fill="#1f1018" stroke="{PINK}" stroke-opacity=".55"/>'
+        ink, star = "#ffe6ef", PINK
+    body = shape + sparkle(24, 20, 7, star, 1, ' class="tw"') + f'<text x="40" y="25" font-family="{SANS}" font-size="13.5" font-weight="700" fill="{ink}">{escape(text)}</text>'
+    css = f"@keyframes shine{{0%,70%{{transform:translateX(0) skewX(-20deg)}}100%{{transform:translateX({width + 90}px) skewX(-20deg)}}}}.shine{{animation:shine 4.5s ease-in infinite}}@media(prefers-reduced-motion:reduce){{.shine{{animation:none}}}}"
+    write(name, width, height, body, text, css)
+
+
+def ticker(repos, now):
+    """Recent commit messages scrolling past, newest first."""
+    commits = []
+    for repo in repos:
+        history = ((repo["defaultBranchRef"] or {}).get("target") or {}).get("history", {}).get("nodes", [])
+        commits += [(node["committedDate"], repo["name"], node["messageHeadline"]) for node in history]
+    commits = sorted(commits, reverse=True)[:8]
+
+    def ago(stamp):
+        days = (now - datetime.fromisoformat(stamp.replace("Z", "+00:00"))).days
+        return "today" if days <= 0 else f"{days}d ago"
+
+    line = "     ✦     ".join(f"{name}: {message[:64]} ({ago(stamp)})" for stamp, name, message in commits) or "no transmissions yet"
+    line += "     ✦     "
+    width, height, char = 840, 84, 7.52
+    span = len(line) * char
+    body = [backdrop(width, height)]
+    body.append(f'<text x="26" y="34" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">TRANSMISSIONS</text>')
+    body.append(f'<clipPath id="tape"><rect x="20" y="42" width="{width - 40}" height="30"/></clipPath><g clip-path="url(#tape)"><text class="tape" x="26" y="62" font-family="{MONO}" font-size="12.5" fill="#e9d3dc" xml:space="preserve">{escape(line * 2)}</text></g>')
+    css = f"@keyframes tape{{to{{transform:translateX(-{span:.0f}px)}}}}.tape{{animation:tape {max(20, len(line) * 0.16):.0f}s linear infinite}}@media(prefers-reduced-motion:reduce){{.tape{{animation:none}}}}"
+    svg("ticker.svg", width, height, "".join(body), "Recent commits: " + "; ".join(f"{name}: {message}" for _, name, message in commits), css)
+
+
+def toolkit():
+    """The tools behind the public repositories, as a row of chips."""
+    width, height = 840, 92
+    body = [backdrop(width, height)]
+    body.append(f'<text x="26" y="34" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">TOOLKIT</text>')
+    x = 26
+    for index, tool in enumerate(TOOLKIT):
+        chip = round(len(tool) * 7.3 + 34)
+        if x + chip > width - 20:
+            break
+        body.append(f'<rect x="{x}" y="48" width="{chip}" height="26" rx="13" fill="{PINK}" fill-opacity=".08" stroke="{PINK}" stroke-opacity=".35"/>')
+        body.append(sparkle(x + 14, 61, 4, PINK, 1, f' class="tw" style="animation-delay:-{index * 0.45:.2f}s"'))
+        body.append(f'<text x="{x + 24}" y="65.5" font-family="{SANS}" font-size="12" font-weight="600" fill="{TEXT}">{escape(tool)}</text>')
+        x += chip + 8
+    svg("toolkit.svg", width, height, "".join(body), "Toolkit: " + ", ".join(TOOLKIT))
 
 
 def wrap(text, limit, lines):
@@ -93,8 +190,8 @@ def wrap(text, limit, lines):
 
 def header(user, repos):
     width, height = 840, 250
-    body = [backdrop(width, height, "header", 70)]
-    body.append(f'<g class="fall"><path d="M800 28l-46 23" stroke="#ffd3e0" stroke-width="1.4" stroke-linecap="round"/></g>')
+    body = []
+    body.append(f'<g class="fall"><path d="M470 24l-46 23" stroke="#ffd3e0" stroke-width="1.4" stroke-linecap="round"/></g>')
     body.append(f'<text x="40" y="62" font-family="{MONO}" font-size="12" letter-spacing="3" fill="{PINK}">HFATIH · GITHUB</text>')
     body.append(f'<text x="38" y="128" font-family="{SANS}" font-size="54" font-weight="700" letter-spacing="-2" fill="{TEXT}">{escape(user["name"] or LOGIN)}</text>')
     body.append(f'<text x="40" y="172" font-family="{SERIF}" font-size="27" font-style="italic" fill="{PINK}">desktop tools &amp; small universes.</text>')
@@ -375,7 +472,7 @@ def radar(user, repos, now):
     for index, (value, caption) in enumerate(rows):
         body.append(f'<text x="252" y="{104 + index * 34}" font-family="{SANS}" font-size="22" font-weight="700" fill="{TEXT}">{value}<tspan dx="8" font-family="{MONO}" font-size="10.5" font-weight="400" fill="{MUTED}">{caption}</tspan></text>')
     body.append(f'<text x="252" y="{height - 34}" font-family="{SANS}" font-size="11" fill="{MUTED}">Near the centre: pushed</text><text x="252" y="{height - 20}" font-family="{SANS}" font-size="11" fill="{MUTED}">recently. Bigger: more stars.</text>')
-    svg("radar.svg", width, height, "".join(body), f"Radar: {rows[0][0]} stars, {rows[1][0]} forks, {rows[2][0]} followers")
+    svg("radar.svg", width, height, "".join(body), "Radar: " + ", ".join(f"{value} {caption}" for value, caption in rows))
 
 
 def mission(calendar, today):
@@ -421,7 +518,7 @@ def mission(calendar, today):
 def aurora():
     """A closing band of slow aurora light. Decorative."""
     width, height, period = 840, 96, 280
-    body = [backdrop(width, height, "aurora", 26)]
+    body = []
     body.append(f'<clipPath id="band"><rect x="1" y="1" width="{width - 2}" height="{height - 2}" rx="15"/></clipPath><g clip-path="url(#band)">')
     for index, (color, base, swing, speed) in enumerate((("#bca4dd", 62, 13, 19), (PINK, 54, 17, 13), ("#ffe1ea", 68, 9, 27))):
         points = " ".join(f"{x},{base + swing * math.sin(2 * math.pi * x / period + index):.1f}" for x in range(-period, width + period + 1, 14))
@@ -492,32 +589,59 @@ def launches(repos):
 
 def main():
     OUT.mkdir(exist_ok=True)
+    for stale in OUT.glob("*.svg"):
+        stale.unlink()
     user = fetch()
     repos = [repo for repo in user["repositories"]["nodes"] if repo["name"].lower() != LOGIN]
+    calendar = user["contributionsCollection"]["contributionCalendar"]
+    now = datetime.now(timezone.utc)
+
     header(user, repos[:6])
+    terminal(user, repos, calendar)
     for repo in repos:
         card(repo)
-    sky(user["contributionsCollection"]["contributionCalendar"])
-    languages(repos)
-    calendar = user["contributionsCollection"]["contributionCalendar"]
-    terminal(user, repos, calendar)
+    orbits(repos)
+    moon(now)
     galaxy(calendar)
     signal(calendar)
-    orbits(repos)
-    now = datetime.now(timezone.utc)
     blackhole(repos)
     radar(user, repos, now)
     mission(calendar, now.date())
-    aurora()
-    moon(datetime.now(timezone.utc))
+    sky(calendar)
     launches(repos)
-    # Keep the README's project grid in step with the repositories that exist.
-    readme = Path(__file__).parent / "README.md"
-    before, _, rest = readme.read_text(encoding="utf-8").partition("<!-- projects:start -->")
-    grid = "\n".join(f'<a href="{repo["url"]}"><img src="assets/repo-{repo["name"]}.svg" width="49.5%" alt="{escape(repo["name"])}"></a>' for repo in repos)
-    tail = rest.partition("<!-- projects:end -->")[2]
-    readme.write_text(f"{before}<!-- projects:start -->\n{grid}\n<!-- projects:end -->{tail}", encoding="utf-8", newline="\n")
-    print("drew", 13 + len(repos), "cards for", ", ".join(repo["name"] for repo in repos))
+    ticker(repos, now)
+    languages(repos)
+    toolkit()
+    aurora()
+
+    name = user["name"] or LOGIN
+    poster("sky-top.svg", [["header.svg"], ["terminal.svg"]], f"{name}: desktop tools and small universes. " + CARDS["terminal.svg"][4])
+    cards = [f"repo-{repo['name']}.svg" for repo in repos]
+    rows = [cards[index:index + 2] for index in range(0, len(cards), 2)]
+    rows += [["orbits.svg", "moon.svg"], ["galaxy.svg", "signal.svg"], ["blackhole.svg", "radar.svg"]]
+    rows += [[key] for key in ("mission.svg", "sky.svg", "launches.svg", "ticker.svg", "languages.svg", "toolkit.svg", "aurora.svg")]
+    poster("sky-main.svg", rows, ". ".join(CARDS[key][4] for row in rows for key in row))
+
+    # Buttons carry the links, since a poster is a single image. One per repository, added automatically.
+    links = [("btn-discord.svg", "Join my Discord", DISCORD, True)]
+    links += [(f"btn-{repo['name']}.svg", repo["name"], repo["url"], False) for repo in repos]
+    for file, text, _, primary in links:
+        button(file, text, primary)
+    buttons = "\n".join(f'  <a href="{url}"><img src="assets/{file}" height="40" alt="{escape(text)}"></a>' for file, text, url, _ in links)
+    readme = f"""<p align="center"><img src="assets/sky-top.svg" width="100%" alt="{escape(name)}: desktop tools and small universes"></p>
+
+<p align="center">
+{buttons}
+</p>
+
+<p align="center"><img src="assets/sky-main.svg" width="100%" alt="Projects, orbits, tonight's moon, a contribution galaxy, streaks, recent releases and commits, drawn as one night sky"></p>
+
+<p align="center"><img src="https://komarev.com/ghpvc/?username={LOGIN}&label=visitors&color=e7a0b9&style=flat-square" alt="Profile views"></p>
+
+<sub>Both posters and every button are SVGs drawn by <a href="build.py"><code>build.py</code></a> from the GitHub API and redrawn every three hours: a new repository gets its own card, planet, radar blip and button without any editing.</sub>
+"""
+    (Path(__file__).parent / "README.md").write_text(readme, encoding="utf-8", newline="\n")
+    print("drew", len(CARDS), "cards and", len(links), "buttons for", ", ".join(repo["name"] for repo in repos))
 
 
 if __name__ == "__main__":
