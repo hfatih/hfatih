@@ -39,7 +39,9 @@ QUERY = """query($login: String!) { user(login: $login) {
                orderBy: {field: STARGAZERS, direction: DESC}) { nodes {
     name description stargazerCount forkCount url pushedAt createdAt
     defaultBranchRef { target { ... on Commit { history(first: 40) { nodes { messageHeadline committedDate } } } } }
-    releases(first: 1, orderBy: {field: CREATED_AT, direction: DESC}) { nodes { tagName publishedAt } }
+    releases(first: 30, orderBy: {field: CREATED_AT, direction: DESC}) { totalCount nodes { tagName publishedAt } }
+    issues(states: OPEN) { totalCount } pullRequests(states: OPEN) { totalCount }
+    stargazers(last: 6) { edges { starredAt node { login } } }
     primaryLanguage { name color }
     languages(first: 10, orderBy: {field: SIZE, direction: DESC}) { edges { size node { name color } } } } } } }"""
 
@@ -781,6 +783,85 @@ def cargo(repos):
     svg("cargo.svg", width, height, "".join(body), "Recent commits by kind: " + ", ".join(f"{count} {name}" for name, count in rows), css)
 
 
+def when(stamp):
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+
+
+def control(repos, now):
+    """A status board: one row per repository with what is open and how recently it moved."""
+    shown = repos[:8]
+    width, height = 840, 82 + len(shown) * 26
+    columns = [(330, "issues"), (430, "pull requests"), (560, "releases"), (680, "last push")]
+    body = [backdrop(width, height)]
+    body.append(f'<text x="28" y="38" font-family="{MONO}" font-size="12.5" fill="{TEXT}"><tspan fill="{PINK}">{LOGIN}@github</tspan> ~ $ ./mission-control</text>')
+    for x, label in columns:
+        body.append(f'<text x="{x}" y="64" text-anchor="end" font-family="{MONO}" font-size="9.5" letter-spacing="1" fill="{MUTED}">{label.upper()}</text>')
+    body.append(f'<text x="{width - 28}" y="64" text-anchor="end" font-family="{MONO}" font-size="9.5" letter-spacing="1" fill="{MUTED}">STATUS</text>')
+    for index, repo in enumerate(shown):
+        y = 88 + index * 26
+        age = (now - when(repo["pushedAt"])).days
+        status, color, live = ("active", "#ffe1ea", True) if age <= 14 else ("quiet", PINK, False) if age <= 90 else ("dormant", MUTED, False)
+        ago = "today" if age <= 0 else f"{age}d ago"
+        values = [repo["issues"]["totalCount"], repo["pullRequests"]["totalCount"], repo["releases"]["totalCount"], ago]
+        body.append(f'<text x="28" y="{y}" font-family="{MONO}" font-size="12" fill="{TEXT}">{escape(repo["name"][:28])}</text>')
+        for (x, _), value in zip(columns, values):
+            body.append(f'<text x="{x}" y="{y}" text-anchor="end" font-family="{MONO}" font-size="12" fill="{TEXT if value not in (0, "0") else MUTED}">{value}</text>')
+        pulse = f' class="tw" style="animation-delay:-{index * 0.5:.1f}s"' if live else ""
+        body.append(f'<circle cx="{width - 34}" cy="{y - 4}" r="4" fill="{color}"{pulse}/>')
+        body.append(f'<text x="{width - 46}" y="{y}" text-anchor="end" font-family="{MONO}" font-size="11" fill="{color}">{status}</text>')
+    svg("control.svg", width, height, "".join(body), "Status board: " + "; ".join(f"{repo['name']} {repo['issues']['totalCount']} open issues, {repo['releases']['totalCount']} releases" for repo in shown))
+
+
+def trail(repos, now):
+    """Every release of the last twelve months, one lane per repository."""
+    shown = repos[:8]
+    width, height = 840, 92 + len(shown) * 26
+    left, right, span_days = 236, width - 60, 365
+    body = [backdrop(width, height)]
+    body.append(f'<text x="26" y="34" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">RELEASE TRAIL</text>')
+    body.append(f'<text x="{width - 28}" y="34" text-anchor="end" font-family="{SANS}" font-size="11" fill="{MUTED}">Each star is a release in the last twelve months.</text>')
+
+    def x_of(moment):
+        return right - (right - left) * (now - moment).days / span_days
+
+    for back in range(12):
+        tick = (now.replace(day=1) - timedelta(days=30 * back)).replace(day=1)
+        if (now - tick).days <= span_days:
+            x = x_of(tick)
+            body.append(f'<path d="M{x:.1f} 50V{62 + len(shown) * 26}" stroke="{PINK}" stroke-opacity=".1"/>')
+            if back % 2 == 0:
+                body.append(f'<text x="{x:.1f}" y="{80 + len(shown) * 26}" text-anchor="middle" font-family="{MONO}" font-size="9.5" fill="{MUTED}">{tick.strftime("%b")}</text>')
+    for index, repo in enumerate(shown):
+        y = 68 + index * 26
+        recent = [node for node in repo["releases"]["nodes"] if node["publishedAt"] and (now - when(node["publishedAt"])).days <= span_days]
+        body.append(f'<text x="28" y="{y + 4}" font-family="{MONO}" font-size="11.5" fill="{TEXT}">{escape(repo["name"][:24])}</text>')
+        body.append(f'<path d="M{left} {y}H{right}" stroke="{ROSE}" stroke-opacity=".35" stroke-dasharray="1 6"/>')
+        for position, node in enumerate(recent):
+            newest = position == 0
+            body.append(sparkle(round(x_of(when(node["publishedAt"])), 1), y, 7 if newest else 4.5, "#ffe1ea" if newest else PINK, 1 if newest else 0.8, ' class="tw"' if newest else ""))
+        body.append(f'<text x="{width - 28}" y="{y + 4}" text-anchor="end" font-family="{MONO}" font-size="11" fill="{PINK if recent else MUTED}">{len(recent) or "–"}</text>')
+    svg("trail.svg", width, height, "".join(body), "Releases in the last twelve months: " + ", ".join(f"{repo['name']} {repo['releases']['totalCount']}" for repo in shown))
+
+
+def stargazers(repos):
+    """The latest people to star something, by name."""
+    fans = sorted(((edge["starredAt"], edge["node"]["login"], repo["name"]) for repo in repos for edge in repo["stargazers"]["edges"] if edge["node"]["login"].lower() != LOGIN), reverse=True)[:6]
+    width, height = 840, 104
+    body = [backdrop(width, height)]
+    body.append(f'<text x="26" y="34" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">STARGAZERS</text>')
+    body.append(f'<text x="26" y="72" font-family="{SERIF}" font-size="21" font-style="italic" fill="{TEXT}">{"thank you" if fans else "be the first star"}</text>')
+    x = 150
+    for index, (_, login, repo) in enumerate(fans):
+        chip = round((len(login) + len(repo)) * 6.9 + 62)
+        if x + chip > width - 20:
+            break
+        body.append(f'<rect x="{x}" y="52" width="{chip}" height="30" rx="15" fill="{PINK}" fill-opacity=".08" stroke="{PINK}" stroke-opacity=".35"/>')
+        body.append(sparkle(x + 16, 67, 5.5, "#ffe1ea", 1, f' class="tw" style="animation-delay:-{index * 0.7:.1f}s"'))
+        body.append(f'<text x="{x + 28}" y="71.5" font-family="{SANS}" font-size="12.5" font-weight="700" fill="{TEXT}">@{escape(login)}<tspan dx="7" font-family="{MONO}" font-size="10.5" font-weight="400" fill="{MUTED}">{escape(repo)}</tspan></text>')
+        x += chip + 10
+    svg("stargazers.svg", width, height, "".join(body), "Latest stargazers: " + ", ".join(f"{login} starred {repo}" for _, login, repo in fans))
+
+
 SYNODIC = 29.530588853
 PHASES = ["New moon", "Waxing crescent", "First quarter", "Waxing gibbous", "Full moon", "Waning gibbous", "Last quarter", "Waning crescent"]
 
@@ -873,13 +954,16 @@ def main():
     meteors(now.date())
     earth(now.date())
     cargo(repos)
+    control(repos, now)
+    trail(repos, now)
+    stargazers(repos)
 
     name = NAME
     poster("sky-top.svg", [["header.svg"], ["terminal.svg"]], f"{name}: desktop tools and small universes. " + CARDS["terminal.svg"][4], round_top=True)
     cards = [f"repo-{repo['name']}.svg" for repo in repos]
     rows = [cards[index:index + 2] for index in range(0, len(cards), 2)]
     rows += [["orbits.svg", "moon.svg"], ["galaxy.svg", "signal.svg"], ["blackhole.svg", "radar.svg"], ["hours.svg", "logbook.svg"], ["earth.svg", "meteors.svg"]]
-    rows += [[key] for key in ("mission.svg", "milestones.svg", "sky.svg", "launches.svg", "ticker.svg", "cargo.svg", "languages.svg", "spectra.svg", "toolkit.svg", "aurora.svg")]
+    rows += [[key] for key in ("control.svg", "mission.svg", "milestones.svg", "sky.svg", "launches.svg", "trail.svg", "ticker.svg", "cargo.svg", "languages.svg", "spectra.svg", "toolkit.svg", "stargazers.svg", "aurora.svg")]
     poster("sky-main.svg", rows, ". ".join(CARDS[key][4] for row in rows for key in row), round_bottom=True)
 
     # The menu carries the links, since a poster is a single image. One button per repository, added automatically.
