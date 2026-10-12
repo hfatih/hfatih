@@ -45,17 +45,23 @@ QUERY = """query($login: String!) { user(login: $login) {
 
 
 def api(path, accept="application/vnd.github+json"):
-    """One REST call for public data: through the GitHub CLI locally, without sign-in in Actions.
-
-    The Actions token only covers this repository and is refused for the others, while the same
-    public data is readable anonymously (within GitHub's hourly limit for unsigned requests).
-    """
-    if not os.environ.get("GITHUB_TOKEN"):
+    """One REST call: through the GitHub CLI locally, with the Actions token in a workflow."""
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
         out = subprocess.run(["gh", "api", "-H", f"Accept: {accept}", path], capture_output=True, text=True, check=True, encoding="utf-8")
         return json.loads(out.stdout)
-    request = urllib.request.Request(f"https://api.github.com/{path}", headers={"Accept": accept, "User-Agent": LOGIN})
+    request = urllib.request.Request(f"https://api.github.com/{path}", headers={"Authorization": f"Bearer {token}", "Accept": accept, "User-Agent": LOGIN})
     with urllib.request.urlopen(request, timeout=30) as response:
         return json.load(response)
+
+
+def attempt(label, call):
+    """Runs one optional lookup; a refusal is logged and reported as None instead of stopping the draw."""
+    try:
+        return call()
+    except Exception as error:
+        print("skipped", label, "-", error)
+        return None
 
 
 def fetch():
@@ -75,15 +81,11 @@ def fetch():
     # read them for other repositories through the GraphQL query above.
     for repo in user["repositories"]["nodes"]:
         base = f"repos/{LOGIN}/{repo['name']}"
-        try:
-            pulls = len(api(f"{base}/pulls?state=open&per_page=100"))
-            issues = api(base)["open_issues_count"] - pulls  # the count GitHub reports includes pull requests
-            fans = api(f"{base}/stargazers?per_page=100", "application/vnd.github.star+json")
-        except Exception as error:  # a missing extra must not take the whole page down
-            print("skipped extras for", repo["name"], "-", error)
-            pulls, issues, fans = None, None, []  # unknown, shown as a dash rather than a false zero
+        pulls = attempt(f"{repo['name']} pull requests", lambda: len(api(f"{base}/pulls?state=open&per_page=100")))
+        opened = attempt(f"{repo['name']} issue count", lambda: api(base)["open_issues_count"])  # includes pull requests
+        fans = attempt(f"{repo['name']} stargazers", lambda: api(f"{base}/stargazers?per_page=100", "application/vnd.github.star+json")) or []
         repo["pullRequests"] = {"totalCount": pulls}
-        repo["issues"] = {"totalCount": issues if issues is None else max(issues, 0)}
+        repo["issues"] = {"totalCount": None if pulls is None or opened is None else max(opened - pulls, 0)}
         repo["stargazers"] = {"edges": [{"starredAt": fan["starred_at"], "node": {"login": fan["user"]["login"]}} for fan in fans[-6:]]}
     return user
 
