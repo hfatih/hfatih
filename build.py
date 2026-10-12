@@ -24,7 +24,7 @@ PINK, ROSE, TEXT, MUTED, LINE = "#f0abc5", "#e7a0b9", "#f5f5f6", "#a48a97", "#5a
 FALLBACK = {"samanyolu3d": "Interactive 3D galaxy simulation and procedural galactic visualization in your browser."}
 
 QUERY = """query($login: String!) { user(login: $login) {
-  name
+  name createdAt
   contributionsCollection { contributionCalendar { totalContributions
     weeks { contributionDays { contributionCount date } } } }
   repositories(first: 50, ownerAffiliations: OWNER, privacy: PUBLIC, isFork: false,
@@ -69,9 +69,10 @@ def backdrop(width, height, seed, stars):
     return "".join(parts)
 
 
-def svg(name, width, height, body, label):
+def svg(name, width, height, body, label, css=""):
     style = "<style>@keyframes tw{0%,100%{opacity:.25}50%{opacity:1}}.tw{animation:tw 3.2s ease-in-out infinite}@keyframes fall{0%{transform:translate(0,0);opacity:0}8%{opacity:.9}22%{transform:translate(-190px,95px);opacity:0}100%{opacity:0}}.fall{animation:fall 9s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.spin{animation:spin linear infinite}@media(prefers-reduced-motion:reduce){.tw,.fall,.spin{animation:none}}</style>"
-    text = f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="{escape(label)}">{style}{body}</svg>\n'
+    extra = f"<style>{css}</style>" if css else ""
+    text = f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="{escape(label)}">{style}{extra}{body}</svg>\n'
     (OUT / name).write_text(text, encoding="utf-8", newline="\n")
 
 
@@ -214,6 +215,109 @@ def orbits(repos):
     svg("orbits.svg", width, height, "".join(body), "Repositories drawn as planets in orbit")
 
 
+def terminal(user, repos, calendar):
+    """A terminal that types out who this is, a few live numbers and the latest release."""
+    releases = sorted(
+        ((repo["releases"]["nodes"][0]["publishedAt"], repo["name"], repo["releases"]["nodes"][0]["tagName"]) for repo in repos if repo["releases"]["nodes"] and repo["releases"]["nodes"][0]["publishedAt"]),
+        reverse=True,
+    )
+    stars = sum(repo["stargazerCount"] for repo in repos)
+    prompt = f"{LOGIN}@github ~ $ "
+    lines = [
+        (prompt, "whoami"),
+        ("", f"{user['name'] or LOGIN} · builds desktop tools and small universes"),
+        (prompt, "./stats"),
+        ("", f"{len(repos)} public repos · {stars} stars · {calendar['totalContributions']} contributions this year · here since {user['createdAt'][:4]}"),
+        (prompt, "./now"),
+        ("", f"shipping {releases[0][1]} {releases[0][2]}" if releases else "building the next thing"),
+    ]
+    width, row, top, left, char = 840, 24, 62, 30, 7.82
+    height = top + len(lines) * row + 30
+    screen = "#150c13"
+    body = [backdrop(width, height, "terminal", 0)]
+    body.append(f'<rect x="14" y="14" width="{width - 28}" height="{height - 28}" rx="10" fill="{screen}" stroke="{LINE}"/>')
+    body.append(f'<clipPath id="screen"><rect x="16" y="16" width="{width - 32}" height="{height - 32}" rx="9"/></clipPath>')
+    for index, color in enumerate(("#e7a0b9", "#e8b86d", "#bca4dd")):
+        body.append(f'<circle cx="{34 + index * 16}" cy="33" r="4.5" fill="{color}" opacity=".8"/>')
+    body.append(f'<text x="{width / 2}" y="37" text-anchor="middle" font-family="{MONO}" font-size="10.5" fill="{MUTED}">{LOGIN}: ~</text>')
+    total, clock, frames = 16.0, 0.6, []
+    for index, (lead, text) in enumerate(lines):
+        y = top + index * row
+        typed = bool(lead)  # commands are typed, their output appears at once
+        span = len(text) * 0.07 if typed else 0.05
+        start, end = clock / total * 100, (clock + span) / total * 100
+        clock += span + (0.35 if typed else 0.8)
+        x = left + len(lead) * char
+        cover = len(text) * char + 14
+        body.append(f'<text x="{left}" y="{y}" font-family="{MONO}" font-size="13" xml:space="preserve"><tspan fill="{PINK}">{escape(lead)}</tspan><tspan fill="{TEXT if typed else "#d9bcc8"}">{escape(text)}</tspan></text>')
+        # Clipped to the screen so a cover sliding off its line never paints over the card's edge.
+        body.append(f'<g clip-path="url(#screen)"><rect class="cover c{index}" x="{x:.1f}" y="{y - 15}" width="{cover:.1f}" height="21" fill="{screen}"/></g>')
+        frames.append(f"@keyframes c{index}{{0%,{start:.2f}%{{transform:translateX(0)}}{end:.2f}%,97%{{transform:translateX({cover:.1f}px)}}100%{{transform:translateX(0)}}}}.c{index}{{animation:c{index} {total}s steps({max(1, len(text)) if typed else 1},end) infinite}}")
+    y = top + len(lines) * row
+    body.append(f'<text x="{left}" y="{y}" font-family="{MONO}" font-size="13" fill="{PINK}" xml:space="preserve">{escape(prompt)}</text>')
+    body.append(f'<rect class="blink" x="{left + len(prompt) * char:.1f}" y="{y - 13}" width="8" height="16" fill="{PINK}"/>')
+    css = "".join(frames) + "@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}.blink{animation:blink 1.1s steps(1) infinite}@media(prefers-reduced-motion:reduce){.cover{display:none}.blink{animation:none}}"
+    svg("terminal.svg", width, height, "".join(body), " ".join(text for _, text in lines), css)
+
+
+def galaxy(calendar):
+    """The year as a slowly turning spiral galaxy: one bright star per contribution, dust for the arms."""
+    width, height = 412, 260
+    cx, cy = 206, 132
+    rng = random.Random("galaxy")
+    count = calendar["totalContributions"]
+
+    def arm_point(spread):
+        arm, t = rng.choice((0, math.pi)), rng.random() ** 0.8
+        angle = arm + t * 3.6 * math.pi / 2 + rng.gauss(0, spread)
+        radius = 14 + t * 150
+        return round(cx + radius * math.cos(angle), 1), round(cy + radius * math.sin(angle), 1), t
+
+    disc = []
+    for _ in range(260):
+        x, y, t = arm_point(0.28)
+        disc.append(f'<circle cx="{x}" cy="{y}" r="{rng.uniform(0.5, 1.3):.1f}" fill="#ffc3d7" opacity="{0.5 - 0.35 * t:.2f}"/>')
+    for index in range(min(count, 140)):
+        x, y, _ = arm_point(0.16)
+        disc.append(sparkle(x, y, round(rng.uniform(2.6, 5.2), 1), "#ffe1ea", 0.95, f' class="tw" style="animation-delay:-{index % 9 * 0.4:.1f}s"'))
+    body = [backdrop(width, height, "galaxy-bg", 14)]
+    body.append(f'<defs><radialGradient id="core"><stop offset="0" stop-color="#ffe1ea" stop-opacity=".9"/><stop offset=".35" stop-color="{PINK}" stop-opacity=".28"/><stop offset="1" stop-color="{PINK}" stop-opacity="0"/></radialGradient></defs>')
+    # Squash vertically for a tilted view; the inner group does the turning.
+    body.append(f'<g transform="translate(0 {cy * 0.42:.1f}) scale(1 .58)"><circle cx="{cx}" cy="{cy}" r="62" fill="url(#core)"/><g class="spin" style="transform-origin:{cx}px {cy}px;animation-duration:140s">{"".join(disc)}</g></g>')
+    body.append(f'<text x="26" y="38" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">GALAXY</text>')
+    body.append(f'<text x="26" y="{height - 22}" font-family="{SANS}" font-size="11" fill="{MUTED}"><tspan font-size="16" font-weight="700" fill="{TEXT}">{count}</tspan>  bright stars, one for each contribution this year.</text>')
+    svg("galaxy.svg", width, height, "".join(body), f"A spiral galaxy with {count} bright stars, one per contribution this year")
+
+
+def signal(calendar):
+    """Contributions by weekday as a pulsing signal: which days the work actually happens."""
+    width, height = 412, 260
+    totals = [0] * 7
+    for week in calendar["weeks"]:
+        for day in week["contributionDays"]:
+            totals[date.fromisoformat(day["date"]).weekday()] += day["contributionCount"]
+    peak = max(totals) or 1
+    names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    body = [backdrop(width, height, "signal", 16)]
+    body.append(f'<text x="26" y="38" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">WEEKLY SIGNAL</text>')
+    base, tallest, left, step = 196, 118, 44, 50
+    body.append(f'<path d="M26 {base + 0.5}H{width - 26}" stroke="{LINE}"/>')
+    frames = []
+    for index, value in enumerate(totals):
+        bar = max(4, tallest * value / peak)
+        x = left + index * step
+        busiest = value == peak and value > 0
+        body.append(f'<rect class="bar b{index}" x="{x - 9}" y="{base - bar:.1f}" width="18" height="{bar:.1f}" rx="5" fill="{"#ffe1ea" if busiest else PINK}" opacity="{1 if busiest else 0.38 + 0.5 * value / peak:.2f}" style="transform-origin:{x}px {base}px;animation-delay:-{index * 0.37:.2f}s"/>')
+        if value:
+            body.append(f'<text x="{x}" y="{base - bar - 8:.1f}" text-anchor="middle" font-family="{MONO}" font-size="10.5" fill="{TEXT}">{value}</text>')
+        body.append(f'<text x="{x}" y="{base + 18}" text-anchor="middle" font-family="{MONO}" font-size="10" fill="{MUTED}">{names[index]}</text>')
+    busiest_day = ["Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays", "Sundays"][totals.index(peak)]
+    caption = f"Loudest on {busiest_day}." if sum(totals) else "No signal yet this year."
+    body.append(f'<text x="26" y="{height - 22}" font-family="{SANS}" font-size="11" fill="{MUTED}">{caption}</text>')
+    css = "@keyframes pulse{0%,100%{transform:scaleY(1)}50%{transform:scaleY(.82)}}.bar{animation:pulse 2.6s ease-in-out infinite}@media(prefers-reduced-motion:reduce){.bar{animation:none}}"
+    svg("signal.svg", width, height, "".join(body), "Contributions by weekday: " + ", ".join(f"{name} {value}" for name, value in zip(names, totals)), css)
+
+
 SYNODIC = 29.530588853
 PHASES = ["New moon", "Waxing crescent", "First quarter", "Waxing gibbous", "Full moon", "Waning gibbous", "Last quarter", "Waning crescent"]
 
@@ -281,6 +385,10 @@ def main():
         card(repo)
     sky(user["contributionsCollection"]["contributionCalendar"])
     languages(repos)
+    calendar = user["contributionsCollection"]["contributionCalendar"]
+    terminal(user, repos, calendar)
+    galaxy(calendar)
+    signal(calendar)
     orbits(repos)
     moon(datetime.now(timezone.utc))
     launches(repos)
@@ -290,7 +398,7 @@ def main():
     grid = "\n".join(f'<a href="{repo["url"]}"><img src="assets/repo-{repo["name"]}.svg" width="49.5%" alt="{escape(repo["name"])}"></a>' for repo in repos)
     tail = rest.partition("<!-- projects:end -->")[2]
     readme.write_text(f"{before}<!-- projects:start -->\n{grid}\n<!-- projects:end -->{tail}", encoding="utf-8", newline="\n")
-    print("drew", 6 + len(repos), "cards for", ", ".join(repo["name"] for repo in repos))
+    print("drew", 9 + len(repos), "cards for", ", ".join(repo["name"] for repo in repos))
 
 
 if __name__ == "__main__":
