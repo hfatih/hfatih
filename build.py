@@ -5,11 +5,12 @@ Standard library only. Output goes to assets/; the header is seeded so it does n
 change from run to run.
 """
 import json
+import math
 import os
 import random
 import subprocess
 import urllib.request
-from datetime import date
+from datetime import date, datetime, timezone
 from html import escape
 from pathlib import Path
 
@@ -29,6 +30,7 @@ QUERY = """query($login: String!) { user(login: $login) {
   repositories(first: 50, ownerAffiliations: OWNER, privacy: PUBLIC, isFork: false,
                orderBy: {field: STARGAZERS, direction: DESC}) { nodes {
     name description stargazerCount url pushedAt
+    releases(first: 1, orderBy: {field: CREATED_AT, direction: DESC}) { nodes { tagName publishedAt } }
     primaryLanguage { name color }
     languages(first: 10, orderBy: {field: SIZE, direction: DESC}) { edges { size node { name color } } } } } } }"""
 
@@ -68,7 +70,7 @@ def backdrop(width, height, seed, stars):
 
 
 def svg(name, width, height, body, label):
-    style = "<style>@keyframes tw{0%,100%{opacity:.25}50%{opacity:1}}.tw{animation:tw 3.2s ease-in-out infinite}@keyframes fall{0%{transform:translate(0,0);opacity:0}8%{opacity:.9}22%{transform:translate(-190px,95px);opacity:0}100%{opacity:0}}.fall{animation:fall 9s linear infinite}@media(prefers-reduced-motion:reduce){.tw,.fall{animation:none}}</style>"
+    style = "<style>@keyframes tw{0%,100%{opacity:.25}50%{opacity:1}}.tw{animation:tw 3.2s ease-in-out infinite}@keyframes fall{0%{transform:translate(0,0);opacity:0}8%{opacity:.9}22%{transform:translate(-190px,95px);opacity:0}100%{opacity:0}}.fall{animation:fall 9s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.spin{animation:spin linear infinite}@media(prefers-reduced-motion:reduce){.tw,.fall,.spin{animation:none}}</style>"
     text = f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="{escape(label)}">{style}{body}</svg>\n'
     (OUT / name).write_text(text, encoding="utf-8", newline="\n")
 
@@ -189,6 +191,87 @@ def languages(repos):
     svg("languages.svg", width, height, "".join(body), "Languages: " + ", ".join(name for name, _ in ranked))
 
 
+def orbits(repos):
+    """Each repository as a planet: its size follows the amount of code, its colour the main language."""
+    width, height = 412, 260
+    cx, cy = 286, 134
+    body = [backdrop(width, height, "orbits", 16)]
+    body.append(f'<text x="26" y="38" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">IN ORBIT</text>')
+    body.append(f'<circle cx="{cx}" cy="{cy}" r="16" fill="{PINK}" opacity=".1"/>')
+    body.append(sparkle(cx, cy, 10, "#ffe1ea", 1, ' class="tw"'))
+    planets = sorted(repos, key=lambda repo: sum(edge["size"] for edge in repo["languages"]["edges"]))[:5]
+    for index, repo in enumerate(planets):
+        radius = 34 + index * 19
+        size = sum(edge["size"] for edge in repo["languages"]["edges"])
+        dot = round(3 + min(5, math.log10(max(size, 10)) - 2.5), 1)
+        color = (repo["primaryLanguage"] or {}).get("color") or PINK
+        start = (index * 97) % 360
+        body.append(f'<circle cx="{cx}" cy="{cy}" r="{radius}" fill="none" stroke="{ROSE}" stroke-width=".8" stroke-dasharray="1 4" opacity=".5"/>')
+        body.append(f'<g class="spin" style="transform-origin:{cx}px {cy}px;animation-duration:{18 + index * 13}s;animation-delay:-{start / 10:.0f}s"><circle cx="{cx + radius}" cy="{cy}" r="{dot}" fill="{color}"/></g>')
+        body.append(f'<circle cx="31" cy="{70 + index * 24}" r="{min(dot, 6)}" fill="{color}"/>')
+        body.append(f'<text x="45" y="{74 + index * 24}" font-family="{MONO}" font-size="10.5" fill="#d9bcc8">{escape(repo["name"][:19])}</text>')
+    body.append(f'<text x="26" y="{height - 22}" font-family="{SANS}" font-size="11" fill="{MUTED}">Planet size follows the amount of code.</text>')
+    svg("orbits.svg", width, height, "".join(body), "Repositories drawn as planets in orbit")
+
+
+SYNODIC = 29.530588853
+PHASES = ["New moon", "Waxing crescent", "First quarter", "Waxing gibbous", "Full moon", "Waning gibbous", "Last quarter", "Waning crescent"]
+
+
+def moon(now):
+    """Tonight's moon, from the mean lunar cycle (good to within a few hours)."""
+    width, height = 412, 260
+    age = ((now - datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)).total_seconds() / 86400) % SYNODIC
+    phase = age / SYNODIC
+    lit = (1 - math.cos(2 * math.pi * phase)) / 2
+    name = PHASES[round(phase * 8) % 8]
+    to_full = (SYNODIC / 2 - age) % SYNODIC
+    cx, cy, r = 112, 140, 64
+    waxing = phase < 0.5
+    rx = round(r * abs(math.cos(2 * math.pi * phase)), 1)
+    outer = 1 if waxing else 0
+    # The terminator bulges toward the lit limb for a crescent and away from it for a gibbous moon.
+    crescent = phase < 0.25 or phase > 0.75
+    inner = (0 if crescent else 1) if waxing else (1 if crescent else 0)
+    body = [backdrop(width, height, "moon", 18)]
+    body.append(f'<defs><radialGradient id="lit" cx=".4" cy=".35"><stop offset="0" stop-color="#fff3f7"/><stop offset="1" stop-color="{PINK}"/></radialGradient></defs>')
+    body.append(f'<text x="26" y="38" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">TONIGHT\'S MOON</text>')
+    body.append(f'<circle cx="{cx}" cy="{cy}" r="{r + 12}" fill="{PINK}" opacity="{0.03 + 0.07 * lit:.2f}"/>')
+    body.append(f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="#2a1722" stroke="{LINE}"/>')
+    body.append(f'<path d="M{cx} {cy - r}A{r} {r} 0 0 {outer} {cx} {cy + r}A{rx} {r} 0 0 {inner} {cx} {cy - r}Z" fill="url(#lit)"/>')
+    for dx, dy, size in ((-22, -18, 9), (16, 10, 13), (-8, 28, 7), (26, -26, 6)):
+        body.append(f'<circle cx="{cx + dx}" cy="{cy + dy}" r="{size}" fill="#3a1d2c" opacity=".16"/>')
+    x = 212
+    body.append(f'<text x="{x}" y="112" font-family="{SERIF}" font-size="23" font-style="italic" fill="{TEXT}">{name}</text>')
+    rows = [(f"{lit * 100:.0f}%", "illuminated"), (f"day {age:.0f}", "of 29.5"), (f"{to_full:.0f} d" if to_full >= 1 else "tonight", "to full moon")]
+    for index, (value, caption) in enumerate(rows):
+        body.append(f'<text x="{x}" y="{144 + index * 26}" font-family="{SANS}" font-size="16" font-weight="700" fill="{TEXT}">{value}<tspan dx="7" font-family="{MONO}" font-size="10.5" font-weight="400" fill="{MUTED}">{caption}</tspan></text>')
+    svg("moon.svg", width, height, "".join(body), f"Tonight's moon: {name}, {lit * 100:.0f}% illuminated")
+
+
+def launches(repos):
+    """Latest release of each repository, newest first, as a terminal listing."""
+    rows = []
+    for repo in repos:
+        release = (repo["releases"]["nodes"] or [None])[0]
+        if release and release["publishedAt"]:
+            rows.append((release["publishedAt"], repo["name"], release["tagName"], "released"))
+        else:
+            rows.append((repo["pushedAt"], repo["name"], "main", "last push"))
+    rows = sorted(rows, reverse=True)[:5]
+    width, height = 840, 68 + len(rows) * 26
+    body = [backdrop(width, height, "launches", 30)]
+    body.append(f'<text x="28" y="38" font-family="{MONO}" font-size="12.5" fill="{TEXT}"><tspan fill="{PINK}">{LOGIN}@github</tspan> ~ $ ./launches --recent</text>')
+    for index, (when, name, tag, verb) in enumerate(rows):
+        y = 70 + index * 26
+        stamp = datetime.fromisoformat(when.replace("Z", "+00:00")).strftime("%b %d, %Y")
+        body.append(sparkle(34, y - 4, 5, "#ffe1ea" if index == 0 else PINK, 1 if index == 0 else 0.6, ' class="tw"' if index == 0 else ""))
+        body.append(f'<text x="52" y="{y}" font-family="{MONO}" font-size="12.5" fill="{TEXT}">{escape(name)}</text>')
+        body.append(f'<text x="290" y="{y}" font-family="{MONO}" font-size="12.5" fill="{PINK}">{escape(tag)}</text>')
+        body.append(f'<text x="{width - 28}" y="{y}" text-anchor="end" font-family="{MONO}" font-size="11.5" fill="{MUTED}">{verb} {stamp}</text>')
+    svg("launches.svg", width, height, "".join(body), "Latest releases: " + ", ".join(f"{name} {tag}" for _, name, tag, _ in rows))
+
+
 def main():
     OUT.mkdir(exist_ok=True)
     user = fetch()
@@ -198,13 +281,16 @@ def main():
         card(repo)
     sky(user["contributionsCollection"]["contributionCalendar"])
     languages(repos)
+    orbits(repos)
+    moon(datetime.now(timezone.utc))
+    launches(repos)
     # Keep the README's project grid in step with the repositories that exist.
     readme = Path(__file__).parent / "README.md"
     before, _, rest = readme.read_text(encoding="utf-8").partition("<!-- projects:start -->")
     grid = "\n".join(f'<a href="{repo["url"]}"><img src="assets/repo-{repo["name"]}.svg" width="49.5%" alt="{escape(repo["name"])}"></a>' for repo in repos)
     tail = rest.partition("<!-- projects:end -->")[2]
     readme.write_text(f"{before}<!-- projects:start -->\n{grid}\n<!-- projects:end -->{tail}", encoding="utf-8", newline="\n")
-    print("drew", 3 + len(repos), "cards for", ", ".join(repo["name"] for repo in repos))
+    print("drew", 6 + len(repos), "cards for", ", ".join(repo["name"] for repo in repos))
 
 
 if __name__ == "__main__":

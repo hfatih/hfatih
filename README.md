@@ -7,8 +7,12 @@
 <a href="https://github.com/hfatih/blachole-simulation"><img src="assets/repo-blachole-simulation.svg" width="49.5%" alt="blachole-simulation"></a>
 <!-- projects:end -->
 
+<img src="assets/orbits.svg" width="49.5%" alt="Repositories drawn as planets in orbit"> <img src="assets/moon.svg" width="49.5%" alt="Tonight's moon phase">
+
 <img src="assets/sky.svg" width="100%" alt="Contributions over the last year, drawn as a night sky">
+
+<img src="assets/launches.svg" width="100%" alt="Latest releases">
 
 <img src="assets/languages.svg" width="100%" alt="Languages across public repositories">
 
-<sub>Every card here is an SVG drawn by <a href="build.py"><code>build.py</code></a> from the GitHub API and redrawn each night. In the sky above, a quiet day is a dim dot and a busy day is a bright star.</sub>
+<sub>Every card here is an SVG drawn by <a href="build.py"><code>build.py</code></a> from the GitHub API and redrawn each night. Planets are repositories sized by their code, the moon is tonight's real phase, and in the sky a quiet day is a dim dot while a busy day is a bright star.</sub>
