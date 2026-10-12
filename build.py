@@ -45,12 +45,15 @@ QUERY = """query($login: String!) { user(login: $login) {
 
 
 def api(path, accept="application/vnd.github+json"):
-    """One REST call: with the Actions token when there is one, otherwise through the GitHub CLI."""
-    token = os.environ.get("GITHUB_TOKEN")
-    if not token:
+    """One REST call for public data: through the GitHub CLI locally, without sign-in in Actions.
+
+    The Actions token only covers this repository and is refused for the others, while the same
+    public data is readable anonymously (within GitHub's hourly limit for unsigned requests).
+    """
+    if not os.environ.get("GITHUB_TOKEN"):
         out = subprocess.run(["gh", "api", "-H", f"Accept: {accept}", path], capture_output=True, text=True, check=True, encoding="utf-8")
         return json.loads(out.stdout)
-    request = urllib.request.Request(f"https://api.github.com/{path}", headers={"Authorization": f"Bearer {token}", "Accept": accept, "User-Agent": LOGIN})
+    request = urllib.request.Request(f"https://api.github.com/{path}", headers={"Accept": accept, "User-Agent": LOGIN})
     with urllib.request.urlopen(request, timeout=30) as response:
         return json.load(response)
 
@@ -68,8 +71,8 @@ def fetch():
     if reply.get("errors"):
         raise SystemExit(f"GitHub refused part of the query: {reply['errors']}")
     user = reply["data"]["user"]
-    # Open issues, pull requests and stargazers come from the REST API: the Actions token may read
-    # them there for any public repository, but not through the GraphQL query above.
+    # Open issues, pull requests and stargazers come from the REST API; the Actions token cannot
+    # read them for other repositories through the GraphQL query above.
     for repo in user["repositories"]["nodes"]:
         base = f"repos/{LOGIN}/{repo['name']}"
         try:
@@ -78,9 +81,9 @@ def fetch():
             fans = api(f"{base}/stargazers?per_page=100", "application/vnd.github.star+json")
         except Exception as error:  # a missing extra must not take the whole page down
             print("skipped extras for", repo["name"], "-", error)
-            pulls, issues, fans = 0, 0, []
+            pulls, issues, fans = None, None, []  # unknown, shown as a dash rather than a false zero
         repo["pullRequests"] = {"totalCount": pulls}
-        repo["issues"] = {"totalCount": max(issues, 0)}
+        repo["issues"] = {"totalCount": issues if issues is None else max(issues, 0)}
         repo["stargazers"] = {"edges": [{"starredAt": fan["starred_at"], "node": {"login": fan["user"]["login"]}} for fan in fans[-6:]]}
     return user
 
@@ -833,11 +836,11 @@ def control(repos, now):
         values = [repo["issues"]["totalCount"], repo["pullRequests"]["totalCount"], repo["releases"]["totalCount"], ago]
         body.append(f'<text x="28" y="{y}" font-family="{MONO}" font-size="12" fill="{TEXT}">{escape(repo["name"][:28])}</text>')
         for (x, _), value in zip(columns, values):
-            body.append(f'<text x="{x}" y="{y}" text-anchor="end" font-family="{MONO}" font-size="12" fill="{TEXT if value not in (0, "0") else MUTED}">{value}</text>')
+            body.append(f'<text x="{x}" y="{y}" text-anchor="end" font-family="{MONO}" font-size="12" fill="{TEXT if value not in (0, None) else MUTED}">{"–" if value is None else value}</text>')
         pulse = f' class="tw" style="animation-delay:-{index * 0.5:.1f}s"' if live else ""
         body.append(f'<circle cx="{width - 34}" cy="{y - 4}" r="4" fill="{color}"{pulse}/>')
         body.append(f'<text x="{width - 46}" y="{y}" text-anchor="end" font-family="{MONO}" font-size="11" fill="{color}">{status}</text>')
-    svg("control.svg", width, height, "".join(body), "Status board: " + "; ".join(f"{repo['name']} {repo['issues']['totalCount']} open issues, {repo['releases']['totalCount']} releases" for repo in shown))
+    svg("control.svg", width, height, "".join(body), "Status board: " + "; ".join(f"{repo['name']} {repo['releases']['totalCount']} releases, last push {(now - when(repo['pushedAt'])).days} days ago" for repo in shown))
 
 
 def trail(repos, now):
@@ -877,7 +880,10 @@ def stargazers(repos):
     width, height = 840, 104
     body = [backdrop(width, height)]
     body.append(f'<text x="26" y="34" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">STARGAZERS</text>')
-    body.append(f'<text x="26" y="72" font-family="{SERIF}" font-size="21" font-style="italic" fill="{TEXT}">{"thank you" if fans else "be the first star"}</text>')
+    total = sum(repo["stargazerCount"] for repo in repos)
+    body.append(f'<text x="26" y="72" font-family="{SERIF}" font-size="21" font-style="italic" fill="{TEXT}">{"thank you" if total else "be the first star"}</text>')
+    if total and not fans:
+        body.append(f'<text x="150" y="71.5" font-family="{SANS}" font-size="13" fill="{MUTED}">for {total} stars so far.</text>')
     x = 150
     for index, (_, login, repo) in enumerate(fans):
         chip = round((len(login) + len(repo)) * 6.9 + 62)
