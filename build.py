@@ -15,6 +15,8 @@ from html import escape
 from pathlib import Path
 
 LOGIN = "hfatih"
+NAME = "Fatih HAN"  # written the way its owner writes it, not as the GitHub profile has it
+UTC_OFFSET = 3  # Istanbul; used to place commits on the clock
 OUT = Path(__file__).parent / "assets"
 SANS = "'Segoe UI', system-ui, -apple-system, sans-serif"
 MONO = "ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace"
@@ -34,8 +36,8 @@ QUERY = """query($login: String!) { user(login: $login) {
     weeks { contributionDays { contributionCount date } } } }
   repositories(first: 50, ownerAffiliations: OWNER, privacy: PUBLIC, isFork: false,
                orderBy: {field: STARGAZERS, direction: DESC}) { nodes {
-    name description stargazerCount forkCount url pushedAt
-    defaultBranchRef { target { ... on Commit { history(first: 4) { nodes { messageHeadline committedDate } } } } }
+    name description stargazerCount forkCount url pushedAt createdAt
+    defaultBranchRef { target { ... on Commit { history(first: 40) { nodes { messageHeadline committedDate } } } } }
     releases(first: 1, orderBy: {field: CREATED_AT, direction: DESC}) { nodes { tagName publishedAt } }
     primaryLanguage { name color }
     languages(first: 10, orderBy: {field: SIZE, direction: DESC}) { edges { size node { name color } } } } } } }"""
@@ -202,10 +204,7 @@ def milestones(calendar, repos):
 
 def ticker(repos, now):
     """Recent commit messages scrolling past, newest first."""
-    commits = []
-    for repo in repos:
-        history = ((repo["defaultBranchRef"] or {}).get("target") or {}).get("history", {}).get("nodes", [])
-        commits += [(node["committedDate"], repo["name"], node["messageHeadline"]) for node in history]
+    commits = all_commits(repos)
     commits = sorted(commits, reverse=True)[:8]
 
     def ago(stamp):
@@ -260,7 +259,7 @@ def header(user, repos):
     body = []
     body.append(f'<g class="fall"><path d="M470 24l-46 23" stroke="#ffd3e0" stroke-width="1.4" stroke-linecap="round"/></g>')
     body.append(f'<text x="40" y="62" font-family="{MONO}" font-size="12" letter-spacing="3" fill="{PINK}">HFATIH · GITHUB</text>')
-    body.append(f'<text x="38" y="128" font-family="{SANS}" font-size="54" font-weight="700" letter-spacing="-2" fill="{TEXT}">{escape(user["name"] or LOGIN)}</text>')
+    body.append(f'<text x="38" y="128" font-family="{SANS}" font-size="54" font-weight="700" letter-spacing="-2" fill="{TEXT}">{escape(NAME)}</text>')
     body.append(f'<text x="40" y="172" font-family="{SERIF}" font-size="27" font-style="italic" fill="{PINK}">desktop tools &amp; small universes.</text>')
     body.append(f'<text x="40" y="212" font-family="{SANS}" font-size="13" fill="{MUTED}">Rust and TypeScript for Windows apps · WebGL for galaxies and black holes</text>')
     # Constellation: one star per public repository, joined in order of stars.
@@ -274,7 +273,12 @@ def header(user, repos):
         body.append(sparkle(x, y, size, "#ffe1ea", 1, f' class="tw" style="animation-delay:{index * 0.7:.1f}s"'))
         anchor, dx = ("end", -14) if x > 740 else ("start", 14)
         body.append(f'<text x="{x + dx}" y="{y + 20}" text-anchor="{anchor}" font-family="{MONO}" font-size="10.5" fill="#d9bcc8">{escape(repo["name"])}</text>')
-    svg("header.svg", width, height, "".join(body), f"{user['name']}: desktop tools and small universes")
+    for cx, cy, turn in ((0, 0, 0), (width, 0, 90)):
+        garland = [f'<path d="M14 96Q26 30 96 14" fill="none" stroke="{PINK}" stroke-opacity=".35"/>', f'<path d="M14 62Q22 24 62 14" fill="none" stroke="{PINK}" stroke-opacity=".2"/>']
+        for index, (x, y, size) in enumerate(((20, 84, 4), (27, 58, 6), (40, 38, 8), (60, 24, 6), (86, 17, 4), (22, 24, 10))):
+            garland.append(sparkle(x, y, size, "#ffe1ea" if size > 6 else PINK, 0.9, f' class="tw" style="animation-delay:-{index * 0.6:.1f}s"'))
+        body.append(f'<g transform="translate({cx} {cy}) rotate({turn})">{"".join(garland)}</g>')
+    svg("header.svg", width, height, "".join(body), f"{NAME}: desktop tools and small universes")
 
 
 def card(repo):
@@ -392,7 +396,7 @@ def terminal(user, repos, calendar):
     prompt = f"{LOGIN}@github ~ $ "
     lines = [
         (prompt, "whoami"),
-        ("", f"{user['name'] or LOGIN} · builds desktop tools and small universes"),
+        ("", f"{NAME} · builds desktop tools and small universes"),
         (prompt, "./stats"),
         ("", f"{len(repos)} public repos · {stars} stars · {calendar['totalContributions']} contributions this year · here since {user['createdAt'][:4]}"),
         (prompt, "./now"),
@@ -599,6 +603,88 @@ def aurora():
     svg("aurora.svg", width, height, "".join(body), "Clear skies.", css)
 
 
+def all_commits(repos):
+    return [
+        (node["committedDate"], repo["name"], node["messageHeadline"])
+        for repo in repos
+        for node in ((repo["defaultBranchRef"] or {}).get("target") or {}).get("history", {}).get("nodes", [])
+    ]
+
+
+def hours(repos):
+    """Recent commits placed on a 24-hour dial, in local time."""
+    width, height = 412, 260
+    cx, cy, inner, reach = 292, 134, 30, 52
+    counts = [0] * 24
+    for stamp, _, _ in all_commits(repos):
+        counts[(datetime.fromisoformat(stamp.replace("Z", "+00:00")).hour + UTC_OFFSET) % 24] += 1
+    peak = max(counts) or 1
+    busiest = counts.index(max(counts))
+    body = [backdrop(width, height)]
+    body.append(f'<text x="26" y="38" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">ACTIVE HOURS</text>')
+    body.append(f'<circle cx="{cx}" cy="{cy}" r="{inner}" fill="none" stroke="{PINK}" stroke-opacity=".3"/>')
+    for hour, count in enumerate(counts):
+        angle = math.radians(hour * 15 - 90)
+        length = 3 + reach * count / peak
+        x1, y1 = cx + inner * math.cos(angle), cy + inner * math.sin(angle)
+        x2, y2 = cx + (inner + length) * math.cos(angle), cy + (inner + length) * math.sin(angle)
+        body.append(f'<path d="M{x1:.1f} {y1:.1f}L{x2:.1f} {y2:.1f}" stroke="{"#ffe1ea" if hour == busiest and count else PINK}" stroke-opacity="{1 if count else 0.25}" stroke-width="{4 if count else 2}" stroke-linecap="round"/>')
+    for hour in (0, 6, 12, 18):
+        angle = math.radians(hour * 15 - 90)
+        body.append(f'<text x="{cx + (inner - 12) * math.cos(angle):.1f}" y="{cy + (inner - 12) * math.sin(angle) + 3.5:.1f}" text-anchor="middle" font-family="{MONO}" font-size="9" fill="{MUTED}">{hour:02d}</text>')
+    body.append(f'<g class="spin" style="transform-origin:{cx}px {cy}px;animation-duration:24s"><path d="M{cx} {cy}V{cy - inner + 2}" stroke="#ffe1ea" stroke-width="1.4" stroke-linecap="round"/></g>')
+    body.append(f'<circle cx="{cx}" cy="{cy}" r="2.4" fill="#ffe1ea"/>')
+    total = sum(counts)
+    mood = "night shift" if busiest >= 22 or busiest < 5 else "morning" if busiest < 12 else "afternoon" if busiest < 18 else "evening"
+    if total:
+        body.append(f'<text x="26" y="116" font-family="{SANS}" font-size="34" font-weight="700" letter-spacing="-1" fill="{TEXT}">{busiest:02d}:00</text>')
+        body.append(f'<text x="26" y="140" font-family="{SERIF}" font-size="16" font-style="italic" fill="{PINK}">{mood}</text>')
+    body.append(f'<text x="26" y="{height - 34}" font-family="{SANS}" font-size="11" fill="{MUTED}">Busiest hour across the last</text><text x="26" y="{height - 20}" font-family="{SANS}" font-size="11" fill="{MUTED}">{total} commits, Istanbul time.</text>')
+    svg("hours.svg", width, height, "".join(body), f"Active hours: busiest around {busiest:02d}:00 Istanbul time across the last {total} commits")
+
+
+def logbook(user, repos, now):
+    """How long this has been going, and the first and newest things in it."""
+    width, height = 412, 260
+    cx, cy = 318, 128
+    joined = datetime.fromisoformat(user["createdAt"].replace("Z", "+00:00"))
+    by_age = sorted(repos, key=lambda repo: repo["createdAt"])
+    body = [backdrop(width, height)]
+    body.append(f'<text x="26" y="38" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">LOGBOOK</text>')
+    body.append(f'<circle cx="{cx}" cy="{cy}" r="22" fill="{PINK}" fill-opacity=".14" stroke="{PINK}" stroke-opacity=".5"/><path d="M{cx - 15} {cy - 6}Q{cx} {cy - 13} {cx + 17} {cy - 9}M{cx - 19} {cy + 6}Q{cx} {cy + 13} {cx + 19} {cy + 5}" fill="none" stroke="{PINK}" stroke-opacity=".4"/>')
+    body.append(f'<ellipse cx="{cx}" cy="{cy}" rx="54" ry="54" fill="none" stroke="{ROSE}" stroke-opacity=".4" stroke-dasharray="1 5"/>')
+    body.append(f'<g class="spin" style="transform-origin:{cx}px {cy}px;animation-duration:16s"><g transform="translate({cx + 54} {cy})"><rect x="-4" y="-3" width="8" height="6" rx="1.5" fill="#ffe1ea"/><rect x="-13" y="-2" width="7" height="4" fill="{ROSE}"/><rect x="6" y="-2" width="7" height="4" fill="{ROSE}"/></g></g>')
+    body.append(f'<text x="26" y="112" font-family="{SANS}" font-size="34" font-weight="700" letter-spacing="-1" fill="{TEXT}">{(now - joined).days:,}</text>')
+    body.append(f'<text x="26" y="134" font-family="{MONO}" font-size="10.5" fill="{MUTED}">days on GitHub, since {joined.strftime("%b %Y")}</text>')
+    if by_age:
+        for index, (caption, repo) in enumerate((("first light", by_age[0]), ("newest", by_age[-1]))):
+            when = datetime.fromisoformat(repo["createdAt"].replace("Z", "+00:00")).strftime("%b %Y")
+            body.append(f'<text x="26" y="{height - 44 + index * 20}" font-family="{MONO}" font-size="10.5" fill="{MUTED}">{caption}  <tspan fill="{TEXT}">{escape(repo["name"][:22])}</tspan>  {when}</text>')
+    svg("logbook.svg", width, height, "".join(body), f"{(now - joined).days} days on GitHub since {joined.strftime('%B %Y')}")
+
+
+def spectra(repos):
+    """Each repository's language mix as one line of a spectrum."""
+    shown = repos[:6]
+    width, height = 840, 74 + len(shown) * 26
+    left, right = 250, width - 28
+    body = [backdrop(width, height)]
+    body.append(f'<text x="26" y="34" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">SPECTRA</text>')
+    body.append(f'<text x="{right}" y="34" text-anchor="end" font-family="{SANS}" font-size="11" fill="{MUTED}">One line per repository: its mix of languages.</text>')
+    for index, repo in enumerate(shown):
+        y = 58 + index * 26
+        total = code_size(repo) or 1
+        body.append(f'<text x="28" y="{y + 9}" font-family="{MONO}" font-size="11.5" fill="{TEXT}">{escape(repo["name"][:26])}</text>')
+        x = float(left)
+        for edge in repo["languages"]["edges"]:
+            span = (right - left) * edge["size"] / total
+            body.append(f'<rect x="{x:.1f}" y="{y}" width="{max(span - 1.5, 0.6):.1f}" height="11" rx="2" fill="{edge["node"]["color"] or PINK}"><title>{escape(edge["node"]["name"])}</title></rect>')
+            x += span
+    body.append(f'<clipPath id="lines"><rect x="{left}" y="52" width="{right - left}" height="{len(shown) * 26}"/></clipPath><g clip-path="url(#lines)"><rect class="scan" x="{left - 60}" y="52" width="46" height="{len(shown) * 26}" fill="#fff" opacity=".16"/></g>')
+    css = f"@keyframes scan{{0%,55%{{transform:translateX(0)}}100%{{transform:translateX({right - left + 80}px)}}}}.scan{{animation:scan 7s ease-in-out infinite}}@media(prefers-reduced-motion:reduce){{.scan{{animation:none}}}}"
+    svg("spectra.svg", width, height, "".join(body), "Language mix per repository: " + "; ".join(f"{repo['name']}: " + ", ".join(edge["node"]["name"] for edge in repo["languages"]["edges"][:3]) for repo in shown), css)
+
+
 SYNODIC = 29.530588853
 PHASES = ["New moon", "Waxing crescent", "First quarter", "Waxing gibbous", "Full moon", "Waning gibbous", "Last quarter", "Waning crescent"]
 
@@ -685,13 +771,16 @@ def main():
     aurora()
 
     milestones(calendar, repos)
+    hours(repos)
+    logbook(user, repos, now)
+    spectra(repos)
 
-    name = user["name"] or LOGIN
+    name = NAME
     poster("sky-top.svg", [["header.svg"], ["terminal.svg"]], f"{name}: desktop tools and small universes. " + CARDS["terminal.svg"][4], round_top=True)
     cards = [f"repo-{repo['name']}.svg" for repo in repos]
     rows = [cards[index:index + 2] for index in range(0, len(cards), 2)]
-    rows += [["orbits.svg", "moon.svg"], ["galaxy.svg", "signal.svg"], ["blackhole.svg", "radar.svg"]]
-    rows += [[key] for key in ("mission.svg", "milestones.svg", "sky.svg", "launches.svg", "ticker.svg", "languages.svg", "toolkit.svg", "aurora.svg")]
+    rows += [["orbits.svg", "moon.svg"], ["galaxy.svg", "signal.svg"], ["blackhole.svg", "radar.svg"], ["hours.svg", "logbook.svg"]]
+    rows += [[key] for key in ("mission.svg", "milestones.svg", "sky.svg", "launches.svg", "ticker.svg", "languages.svg", "spectra.svg", "toolkit.svg", "aurora.svg")]
     poster("sky-main.svg", rows, ". ".join(CARDS[key][4] for row in rows for key in row), round_bottom=True)
 
     # The menu carries the links, since a poster is a single image. One button per repository, added automatically.
