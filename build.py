@@ -10,6 +10,8 @@ import os
 import random
 import re
 import subprocess
+import time
+import urllib.error
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from html import escape
@@ -18,6 +20,7 @@ from pathlib import Path
 LOGIN = "hfatih"
 NAME = "Fatih HAN"  # written the way its owner writes it, not as the GitHub profile has it
 UTC_OFFSET = 3  # Istanbul; used to place commits on the clock
+LATITUDE, LONGITUDE = 41.01, 28.98  # Istanbul; used for sunrise and sunset
 OUT = Path(__file__).parent / "assets"
 SANS = "'Segoe UI', system-ui, -apple-system, sans-serif"
 MONO = "ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace"
@@ -31,17 +34,39 @@ SKY = "#150a14"  # the one background colour every image shares, so they join wi
 TOOLKIT = ["Rust", "TypeScript", "React", "Tauri 2", "SQLite", "WebGL 2", "GLSL", "Three.js", "C#", "Node.js"]
 FALLBACK = {"samanyolu3d": "Interactive 3D galaxy simulation and procedural galactic visualization in your browser."}
 
-QUERY = """query($login: String!) { user(login: $login) {
+PULSE_WEEKS = 12  # how far back the activity strip on each project card reaches
+QUERY = """query($login: String!, $since: GitTimestamp!) { user(login: $login) {
   name createdAt followers { totalCount }
   contributionsCollection { contributionCalendar { totalContributions
     weeks { contributionDays { contributionCount date } } } }
   repositories(first: 50, ownerAffiliations: OWNER, privacy: PUBLIC, isFork: false,
                orderBy: {field: STARGAZERS, direction: DESC}) { nodes {
     name description stargazerCount forkCount url pushedAt createdAt
-    defaultBranchRef { target { ... on Commit { history(first: 40) { nodes { messageHeadline committedDate } } } } }
+    defaultBranchRef { target { ... on Commit {
+      history(first: 40) { nodes { messageHeadline committedDate } }
+      pulse: history(first: 100, since: $since) { nodes { committedDate } } } } }
     releases(first: 30, orderBy: {field: CREATED_AT, direction: DESC}) { totalCount nodes { tagName publishedAt } }
     primaryLanguage { name color }
     languages(first: 10, orderBy: {field: SIZE, direction: DESC}) { edges { size node { name color } } } } } } }"""
+
+
+def send(request, tries=3):
+    """Sends one request, trying again after a pause when GitHub has a passing outage.
+
+    A refusal (any 4xx) is final and raised at once; only server errors and dropped
+    connections are worth another go.
+    """
+    for attempt_number in range(tries):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as error:
+            if error.code < 500 or attempt_number == tries - 1:
+                raise
+        except (urllib.error.URLError, TimeoutError):
+            if attempt_number == tries - 1:
+                raise
+        time.sleep(4 * 2 ** attempt_number)
 
 
 def api(path, accept="application/vnd.github+json"):
@@ -50,9 +75,7 @@ def api(path, accept="application/vnd.github+json"):
     if not token:
         out = subprocess.run(["gh", "api", "-H", f"Accept: {accept}", path], capture_output=True, text=True, check=True, encoding="utf-8")
         return json.loads(out.stdout)
-    request = urllib.request.Request(f"https://api.github.com/{path}", headers={"Authorization": f"Bearer {token}", "Accept": accept, "User-Agent": LOGIN})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.load(response)
+    return send(urllib.request.Request(f"https://api.github.com/{path}", headers={"Authorization": f"Bearer {token}", "Accept": accept, "User-Agent": LOGIN}))
 
 
 def attempt(label, call):
@@ -66,14 +89,13 @@ def attempt(label, call):
 
 def fetch():
     token = os.environ.get("GITHUB_TOKEN")
+    since = (datetime.now(timezone.utc) - timedelta(weeks=PULSE_WEEKS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     if not token:  # local run: let the GitHub CLI handle sign-in
-        out = subprocess.run(["gh", "api", "graphql", "-f", f"query={QUERY}", "-f", f"login={LOGIN}"], capture_output=True, text=True, check=True, encoding="utf-8")
+        out = subprocess.run(["gh", "api", "graphql", "-f", f"query={QUERY}", "-f", f"login={LOGIN}", "-f", f"since={since}"], capture_output=True, text=True, check=True, encoding="utf-8")
         reply = json.loads(out.stdout)
     else:
-        body = json.dumps({"query": QUERY, "variables": {"login": LOGIN}}).encode()
-        request = urllib.request.Request("https://api.github.com/graphql", body, {"Authorization": f"Bearer {token}", "User-Agent": LOGIN})
-        with urllib.request.urlopen(request, timeout=30) as response:
-            reply = json.load(response)
+        body = json.dumps({"query": QUERY, "variables": {"login": LOGIN, "since": since}}).encode()
+        reply = send(urllib.request.Request("https://api.github.com/graphql", body, {"Authorization": f"Bearer {token}", "User-Agent": LOGIN}))
     if reply.get("errors"):
         raise SystemExit(f"GitHub refused part of the query: {reply['errors']}")
     user = reply["data"]["user"]
@@ -317,7 +339,7 @@ def header(user, repos):
     svg("header.svg", width, height, "".join(body), f"{NAME}: desktop tools and small universes")
 
 
-def card(repo):
+def card(repo, now):
     width, height = 412, 158
     language = repo["primaryLanguage"] or {"name": "Other", "color": PINK}
     body = [backdrop(width, height, repo["name"], 22)]
@@ -333,7 +355,31 @@ def card(repo):
         body.append(f'<text x="{52 + len(language["name"]) * 6.8:.0f}" y="138" font-family="{MONO}" font-size="11" fill="{PINK}">{escape(release["tagName"])}</text>')
     if repo["stargazerCount"]:
         body.append(f'<text x="{width - 26}" y="138" text-anchor="end" font-family="{MONO}" font-size="11" fill="{PINK}">✦ {repo["stargazerCount"]}</text>')
-    svg(f"repo-{repo['name']}.svg", width, height, "".join(body), f"{repo['name']}: {description}")
+    # Commits per week as a small strip in the top corner, oldest on the left.
+    weeks = pulse(repo, now)
+    peak, right = max(weeks) or 1, width - 26
+    for index, count in enumerate(weeks):
+        x = right - (PULSE_WEEKS - index) * 7 + 2
+        if count:
+            bar = 3 + 15 * count / peak
+            newest = index == PULSE_WEEKS - 1
+            body.append(f'<rect x="{x}" y="{48 - bar:.1f}" width="4" height="{bar:.1f}" rx="2" fill="{"#ffe1ea" if newest else PINK}" opacity="{1 if newest else 0.45 + 0.4 * count / peak:.2f}"/>')
+        else:
+            body.append(f'<circle cx="{x + 2}" cy="46" r="1.2" fill="{PINK}" opacity=".35"/>')
+    total = sum(weeks)
+    body.append(f'<text x="{right}" y="62" text-anchor="end" font-family="{MONO}" font-size="9" fill="{MUTED}">{total}{"+" if total >= 100 else ""} commits · {PULSE_WEEKS} wk</text>')
+    svg(f"repo-{repo['name']}.svg", width, height, "".join(body), f"{repo['name']}: {description} {total} commits in the last {PULSE_WEEKS} weeks.")
+
+
+def pulse(repo, now):
+    """Commits on the default branch per week, oldest week first, ending with the current one."""
+    weeks = [0] * PULSE_WEEKS
+    history = ((repo["defaultBranchRef"] or {}).get("target") or {}).get("pulse") or {}
+    for node in history.get("nodes", []):
+        back = (now - when(node["committedDate"])).days // 7
+        if 0 <= back < PULSE_WEEKS:
+            weeks[PULSE_WEEKS - 1 - back] += 1
+    return weeks
 
 
 def sky(calendar):
@@ -785,6 +831,151 @@ def earth(today):
     svg("earth.svg", width, height, "".join(body), f"Day {day} of {length}: {day / length * 100:.0f}% of {today.year}, {(when - today).days} days to the {label}")
 
 
+def sun_times(day, zenith=90.833):
+    """Sunrise, solar noon and sunset in Istanbul, as minutes after local midnight (NOAA's formulas).
+
+    The default zenith is the visible sunrise; 96 gives the start and end of civil twilight.
+    """
+    rad = math.radians
+    noon_utc = datetime(day.year, day.month, day.day, 12, tzinfo=timezone.utc) - timedelta(hours=UTC_OFFSET)
+    t = (noon_utc - datetime(2000, 1, 1, 12, tzinfo=timezone.utc)).total_seconds() / 86400 / 36525
+    mean_long = (280.46646 + t * (36000.76983 + t * 0.0003032)) % 360
+    anomaly = 357.52911 + t * (35999.05029 - 0.0001537 * t)
+    ecc = 0.016708634 - t * (0.000042037 + 0.0000001267 * t)
+    centre = math.sin(rad(anomaly)) * (1.914602 - t * (0.004817 + 0.000014 * t)) + math.sin(rad(2 * anomaly)) * (0.019993 - 0.000101 * t) + math.sin(rad(3 * anomaly)) * 0.000289
+    node = 125.04 - 1934.136 * t
+    apparent = mean_long + centre - 0.00569 - 0.00478 * math.sin(rad(node))
+    tilt = 23 + (26 + (21.448 - t * (46.815 + t * (0.00059 - t * 0.001813))) / 60) / 60 + 0.00256 * math.cos(rad(node))
+    decl = math.asin(math.sin(rad(tilt)) * math.sin(rad(apparent)))
+    y = math.tan(rad(tilt / 2)) ** 2
+    equation = 4 * math.degrees(y * math.sin(2 * rad(mean_long)) - 2 * ecc * math.sin(rad(anomaly)) + 4 * ecc * y * math.sin(rad(anomaly)) * math.cos(2 * rad(mean_long)) - 0.5 * y * y * math.sin(4 * rad(mean_long)) - 1.25 * ecc * ecc * math.sin(2 * rad(anomaly)))
+    noon = 720 - 4 * LONGITUDE - equation + UTC_OFFSET * 60
+    reach = 4 * math.degrees(math.acos(math.cos(rad(zenith)) / (math.cos(rad(LATITUDE)) * math.cos(decl)) - math.tan(rad(LATITUDE)) * math.tan(decl)))
+    return noon - reach, noon, noon + reach
+
+
+def clock(minutes):
+    return f"{int(minutes // 60) % 24:02d}:{int(minutes % 60):02d}"
+
+
+def daylight(today):
+    """Today's daylight in Istanbul on a 24-hour dial with noon at the top."""
+    width, height = 412, 260
+    cx, cy, radius = 300, 132, 64
+    rise, noon, sets = sun_times(today)
+    dawn, _, dusk = sun_times(today, 96)
+    length = sets - rise
+    change = length - (sun_times(today - timedelta(days=1))[2] - sun_times(today - timedelta(days=1))[0])
+
+    def spot(minutes, distance=radius):
+        angle = math.radians(minutes / 1440 * 360 + 90)  # midnight at the bottom, noon at the top
+        return round(cx + distance * math.cos(angle), 1), round(cy + distance * math.sin(angle), 1)
+
+    def arc(start, end, distance=radius):
+        (x1, y1), (x2, y2) = spot(start, distance), spot(end, distance)
+        return f"M{x1} {y1}A{distance} {distance} 0 {1 if end - start > 720 else 0} 1 {x2} {y2}"
+
+    body = [backdrop(width, height)]
+    body.append(f'<text x="26" y="38" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">ISTANBUL DAYLIGHT</text>')
+    body.append(f'<circle cx="{cx}" cy="{cy}" r="{radius}" fill="none" stroke="{LINE}" stroke-width="7"/>')
+    body.append(f'<path d="{arc(dawn, dusk)}" fill="none" stroke="{PINK}" stroke-opacity=".3" stroke-width="7"/>')
+    body.append(f'<path d="{arc(rise, sets)}" fill="none" stroke="#ffe1ea" stroke-width="7" stroke-linecap="round"/>')
+    for hour in (0, 6, 12, 18):
+        x, y = spot(hour * 60, radius - 20)
+        body.append(f'<text x="{x}" y="{y + 3.5}" text-anchor="middle" font-family="{MONO}" font-size="9" fill="{MUTED}">{hour:02d}</text>')
+    sx, sy = spot(noon, radius + 18)
+    body.append(f'<g class="spin" style="transform-origin:{sx}px {sy}px;animation-duration:40s">' + "".join(f'<path d="M{sx + 10 * math.cos(math.radians(a)):.1f} {sy + 10 * math.sin(math.radians(a)):.1f}L{sx + 14 * math.cos(math.radians(a)):.1f} {sy + 14 * math.sin(math.radians(a)):.1f}" stroke="#e8b86d" stroke-width="1.5" stroke-linecap="round"/>' for a in range(0, 360, 45)) + "</g>")
+    body.append(f'<circle cx="{sx}" cy="{sy}" r="6.5" fill="#e8b86d"/>')
+    mx, my = spot(0, radius + 18)
+    body.append(f'<path d="M{mx + 2} {my - 6}A6 6 0 1 0 {mx + 2} {my + 6}A7.5 7.5 0 0 1 {mx + 2} {my - 6}Z" fill="#e9d3dc"/>')
+    for minutes in (rise, sets):
+        x, y = spot(minutes)
+        body.append(f'<circle cx="{x}" cy="{y}" r="3" fill="{SKY}" stroke="#ffe1ea" stroke-width="1.5"/>')
+    body.append(f'<text x="26" y="112" font-family="{SANS}" font-size="34" font-weight="700" letter-spacing="-1" fill="{TEXT}">{int(length // 60)}h {int(length % 60):02d}m</text>')
+    body.append(f'<text x="26" y="134" font-family="{MONO}" font-size="10.5" fill="{MUTED}">of daylight today</text>')
+    for index, (value, caption) in enumerate(((clock(rise), "sunrise"), (clock(sets), "sunset"))):
+        body.append(f'<text x="{26 + index * 118}" y="170" font-family="{SANS}" font-size="16" font-weight="700" fill="{TEXT}">{value}<tspan dx="6" font-family="{MONO}" font-size="10.5" font-weight="400" fill="{MUTED}">{caption}</tspan></text>')
+    seconds = round(abs(change) * 60)
+    trend = f"{seconds // 60}m {seconds % 60:02d}s {'longer' if change > 0 else 'shorter'} than yesterday" if seconds else "as long as yesterday"
+    body.append(f'<text x="26" y="{height - 34}" font-family="{SANS}" font-size="11" fill="{MUTED}">{trend},</text><text x="26" y="{height - 20}" font-family="{SANS}" font-size="11" fill="{MUTED}">civil twilight {clock(dawn)} to {clock(dusk)}.</text>')
+    svg("daylight.svg", width, height, "".join(body), f"Istanbul today: sunrise {clock(rise)}, sunset {clock(sets)}, {int(length // 60)} hours {int(length % 60)} minutes of daylight, {trend}")
+
+
+# Orbital elements at J2000 and their change per century, from JPL's approximate positions of
+# the major planets (good to well under a degree between 1800 and 2050): semi-major axis (AU),
+# eccentricity, inclination, mean longitude, longitude of perihelion, longitude of the ascending node.
+PLANETS = {
+    "Mercury": ((0.38709927, 0.20563593, 7.00497902, 252.25032350, 77.45779628, 48.33076593), (0.00000037, 0.00001906, -0.00594749, 149472.67411175, 0.16047689, -0.12534081), "#b7a99a"),
+    "Venus": ((0.72333566, 0.00677672, 3.39467605, 181.97909950, 131.60246718, 76.67984255), (0.00000390, -0.00004107, -0.00078890, 58517.81538729, 0.00268329, -0.27769418), "#f3d9a4"),
+    "Earth": ((1.00000261, 0.01671123, -0.00001531, 100.46457166, 102.93768193, 0.0), (0.00000562, -0.00004392, -0.01294668, 35999.37244981, 0.32327364, 0.0), "#8fb7ff"),
+    "Mars": ((1.52371034, 0.09339410, 1.84969142, -4.55343205, -23.94362959, 49.55953891), (0.00001847, 0.00007882, -0.00813131, 19140.30268499, 0.44441088, -0.29257343), "#e07a5f"),
+    "Jupiter": ((5.20288700, 0.04838624, 1.30439695, 34.39644051, 14.72847983, 100.47390909), (-0.00011607, -0.00013253, -0.00183714, 3034.74612775, 0.21252668, 0.20469106), "#e8b86d"),
+    "Saturn": ((9.53667594, 0.05386179, 2.48599187, 49.95424423, 92.59887831, 113.66242448), (-0.00125060, -0.00050991, 0.00193609, 1222.49362201, -0.41897216, -0.28867794), "#d9c38c"),
+}
+
+
+def heliocentric(name, moment):
+    """A planet's position around the Sun in ecliptic coordinates (AU), from Kepler's equation."""
+    centuries = (moment - datetime(2000, 1, 1, 12, tzinfo=timezone.utc)).total_seconds() / 86400 / 36525
+    start, rate, _ = PLANETS[name]
+    axis, ecc, inc, mean_long, perihelion, node = (value + change * centuries for value, change in zip(start, rate))
+    anomaly = math.radians((mean_long - perihelion + 180) % 360 - 180)
+    eccentric = anomaly
+    for _ in range(8):
+        eccentric -= (eccentric - ecc * math.sin(eccentric) - anomaly) / (1 - ecc * math.cos(eccentric))
+    px, py = axis * (math.cos(eccentric) - ecc), axis * math.sqrt(1 - ecc * ecc) * math.sin(eccentric)
+    w, o, i = math.radians(perihelion - node), math.radians(node), math.radians(inc)
+    x = (math.cos(w) * math.cos(o) - math.sin(w) * math.sin(o) * math.cos(i)) * px + (-math.sin(w) * math.cos(o) - math.cos(w) * math.sin(o) * math.cos(i)) * py
+    y = (math.cos(w) * math.sin(o) + math.sin(w) * math.cos(o) * math.cos(i)) * px + (-math.sin(w) * math.sin(o) + math.cos(w) * math.cos(o) * math.cos(i)) * py
+    z = math.sin(w) * math.sin(i) * px + math.cos(w) * math.sin(i) * py
+    return x, y, z
+
+
+def elongation(name, moment):
+    """How far a planet stands from the Sun as seen from Earth, in degrees, and whether it is east of it."""
+    earth = heliocentric("Earth", moment)
+    away = [p - e for p, e in zip(heliocentric(name, moment), earth)]
+    sun = [-e for e in earth]
+    cos = sum(a * s for a, s in zip(away, sun)) / math.hypot(*away) / math.hypot(*sun)
+    east = (math.atan2(away[1], away[0]) - math.atan2(sun[1], sun[0])) % (2 * math.pi) < math.pi
+    return math.degrees(math.acos(max(-1.0, min(1.0, cos)))), east
+
+
+def planets(now):
+    """The planets where they really are today, seen from above, and which of them show tonight."""
+    width, height = 412, 260
+    cx, cy = 302, 134
+    rings = [18, 31, 44, 59, 75, 92]
+    body = [backdrop(width, height)]
+    body.append(f'<text x="26" y="38" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">PLANETS TONIGHT</text>')
+    body.append(f'<circle cx="{cx}" cy="{cy}" r="12" fill="#e8b86d" opacity=".14"/><circle cx="{cx}" cy="{cy}" r="5.5" fill="#e8b86d" class="tw"/>')
+    seen = []
+    for (name, (_, _, color)), ring in zip(PLANETS.items(), rings):
+        x, y, _ = heliocentric(name, now)
+        angle = math.atan2(y, x)
+        # Ecliptic longitude runs anticlockwise when seen from the north, so y is flipped for the screen.
+        px, py = round(cx + ring * math.cos(angle), 1), round(cy - ring * math.sin(angle), 1)
+        home = name == "Earth"
+        body.append(f'<circle cx="{cx}" cy="{cy}" r="{ring}" fill="none" stroke="{ROSE}" stroke-width=".8" stroke-dasharray="1 4" opacity="{0.75 if home else 0.45}"/>')
+        if name == "Saturn":
+            body.append(f'<ellipse cx="{px}" cy="{py}" rx="7.5" ry="2.4" fill="none" stroke="{color}" stroke-width="1.1" transform="rotate(-20 {px} {py})"/>')
+        body.append(f'<circle cx="{px}" cy="{py}" r="{4.5 if home or name in ("Jupiter", "Saturn") else 3.4}" fill="{color}"/>')
+        if home:
+            body.append(f'<circle cx="{px}" cy="{py}" r="8" fill="none" stroke="{color}" stroke-opacity=".5" class="tw"/>')
+        else:
+            seen.append((name, color, *elongation(name, now)))
+    for index, (name, color, angle, east) in enumerate(seen):
+        y = 70 + index * 24
+        # Within about fifteen degrees of the Sun a planet sets or rises in daylight; Mercury needs more room.
+        status = "lost in the Sun" if angle < (18 if name == "Mercury" else 15) else "all night" if angle > 150 else "evening sky" if east else "morning sky"
+        visible = status != "lost in the Sun"
+        body.append(f'<circle cx="31" cy="{y - 4}" r="4" fill="{color}" opacity="{1 if visible else 0.4}"/>')
+        body.append(f'<text x="43" y="{y}" font-family="{SANS}" font-size="12" font-weight="600" fill="{TEXT if visible else MUTED}">{name}<tspan x="108" font-family="{MONO}" font-size="10.5" font-weight="400" fill="{PINK if visible else MUTED}">{status}</tspan></text>')
+        seen[index] = (name, status)
+    body.append(f'<text x="26" y="{height - 20}" font-family="{SANS}" font-size="11" fill="{MUTED}">Real positions today, seen from above the Sun.</text>')
+    svg("planets.svg", width, height, "".join(body), "Planets tonight: " + ", ".join(f"{name} {status}" for name, status in seen))
+
+
 def cargo(repos):
     """What recent commits were for, judged from keywords in each message."""
     # Checked in order, so "Fix ... and add ..." counts as a fix and a README rewrite as docs.
@@ -968,7 +1159,7 @@ def main():
     header(user, repos[:6])
     terminal(user, repos, calendar)
     for repo in repos:
-        card(repo)
+        card(repo, now)
     orbits(repos)
     moon(now)
     galaxy(calendar)
@@ -989,6 +1180,8 @@ def main():
     spectra(repos)
     meteors(now.date())
     earth(now.date())
+    daylight(now.date())
+    planets(now)
     cargo(repos)
     control(repos, now)
     trail(repos, now)
@@ -998,7 +1191,7 @@ def main():
     poster("sky-top.svg", [["header.svg"], ["terminal.svg"]], f"{name}: desktop tools and small universes. " + CARDS["terminal.svg"][4], round_top=True)
     cards = [f"repo-{repo['name']}.svg" for repo in repos]
     rows = [cards[index:index + 2] for index in range(0, len(cards), 2)]
-    rows += [["orbits.svg", "moon.svg"], ["galaxy.svg", "signal.svg"], ["blackhole.svg", "radar.svg"], ["hours.svg", "logbook.svg"], ["earth.svg", "meteors.svg"]]
+    rows += [["orbits.svg", "moon.svg"], ["galaxy.svg", "signal.svg"], ["blackhole.svg", "radar.svg"], ["hours.svg", "logbook.svg"], ["earth.svg", "meteors.svg"], ["daylight.svg", "planets.svg"]]
     rows += [[key] for key in ("control.svg", "mission.svg", "milestones.svg", "sky.svg", "launches.svg", "trail.svg", "ticker.svg", "cargo.svg", "languages.svg", "spectra.svg", "toolkit.svg", "stargazers.svg", "aurora.svg")]
     poster("sky-main.svg", rows, ". ".join(CARDS[key][4] for row in rows for key in row), round_bottom=True)
 
@@ -1008,7 +1201,7 @@ def main():
     readme = (
         f'<p><img src="assets/sky-top.svg" width="100%" align="top" alt="{escape(name)}: desktop tools and small universes">'
         f"{menu(links)}"
-        '<img src="assets/sky-main.svg" width="100%" align="top" alt="Projects, orbits, tonight\'s moon, a contribution galaxy, streaks, milestones, recent releases and commits, drawn as one night sky"></p>\n\n'
+        '<img src="assets/sky-main.svg" width="100%" align="top" alt="Projects, orbits, tonight\'s moon and planets, Istanbul daylight, a contribution galaxy, streaks, milestones, recent releases and commits, drawn as one night sky"></p>\n\n'
         '<sub>The sky and every button are SVGs drawn by <a href="build.py"><code>build.py</code></a> from the GitHub API and redrawn every three hours: a new repository gets its own card, planet, radar blip and menu button without any editing.</sub>\n'
     )
     (Path(__file__).parent / "README.md").write_text(readme, encoding="utf-8", newline="\n")
