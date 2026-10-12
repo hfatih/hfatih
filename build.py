@@ -22,7 +22,8 @@ SERIF = "Georgia, 'Times New Roman', serif"
 PINK, ROSE, TEXT, MUTED, LINE = "#f0abc5", "#e7a0b9", "#f5f5f6", "#a48a97", "#5a2a40"
 # Descriptions for repositories whose GitHub description is empty.
 # Shown as the first button. Everything else on the page comes from the GitHub API.
-DISCORD = "https://discord.gg/starlitv"
+DISCORD = ("Talk to me on Discord", "https://discordapp.com/users/268797596280160259")
+SKY = "#150a14"  # the one background colour every image shares, so they join without a seam
 # What the public repositories are built with, per their own READMEs.
 TOOLKIT = ["Rust", "TypeScript", "React", "Tauri 2", "SQLite", "WebGL 2", "GLSL", "Three.js", "C#", "Node.js"]
 FALLBACK = {"samanyolu3d": "Interactive 3D galaxy simulation and procedural galactic visualization in your browser."}
@@ -77,11 +78,32 @@ def write(name, width, height, body, label, css=""):
     (OUT / name).write_text(text, encoding="utf-8", newline="\n")
 
 
-def poster(name, rows, label):
-    """Lays cards out in rows on one continuous night sky and writes it as a single image.
+def night(width, height, seed, nebulae=True):
+    """A patch of the shared sky: flat colour, drifts of nebula kept clear of the edges, and stars."""
+    rng = random.Random(seed)
+    parts = [f'<rect width="{width}" height="{height}" fill="{SKY}"/>']
+    if nebulae:
+        parts.insert(0, f'<defs><radialGradient id="rose"><stop offset="0" stop-color="#b7466c" stop-opacity=".34"/><stop offset="1" stop-color="#b7466c" stop-opacity="0"/></radialGradient><radialGradient id="violet"><stop offset="0" stop-color="#644d8e" stop-opacity=".3"/><stop offset="1" stop-color="#644d8e" stop-opacity="0"/></radialGradient></defs>')
+        # Each drift sits fully inside the image; one cut off at an edge would show as a seam.
+        for index, top in enumerate(range(250, height - 240, 430)):
+            left = index % 2 == 0
+            parts.append(f'<ellipse cx="{rng.uniform(260, 380) if left else rng.uniform(500, 620):.0f}" cy="{top}" rx="{rng.uniform(220, 250):.0f}" ry="{rng.uniform(170, 220):.0f}" fill="url(#{"rose" if index % 3 else "violet"})"/>')
+    for index in range(int(width * height / 2100)):
+        x, y = round(rng.uniform(4, width - 4), 1), round(rng.uniform(4, height - 4), 1)
+        twinkle = f' class="tw" style="animation-delay:-{index % 13 * 0.5:.1f}s"' if index % 9 == 0 else ""
+        if rng.random() < 0.26:
+            parts.append(sparkle(x, y, round(rng.uniform(2, 5.5), 1), "#ffc3d7", rng.uniform(0.14, 0.4), twinkle))
+        else:
+            parts.append(f'<circle cx="{x}" cy="{y}" r="{rng.uniform(0.5, 1.4):.1f}" fill="#ffc3d7" opacity="{rng.uniform(0.14, 0.42):.2f}"{twinkle}/>')
+    return "".join(parts)
+
+
+def poster(name, rows, label, round_top=False, round_bottom=False):
+    """Lays cards out in rows on the shared sky and writes it as a single image.
 
     Each card sits in its own nested <svg>, which keeps the pixel transform origins its
-    animations use relative to the card instead of the whole poster.
+    animations use relative to the card instead of the whole poster. Only the outer corners
+    of the page are rounded: the posters and the menu between them stack flush.
     """
     pad, gap = 24, 16
     width = 840 + 2 * pad
@@ -96,41 +118,86 @@ def poster(name, rows, label):
             tallest = max(tallest, h)
         y += tallest + gap
     height = y - gap + pad
-    rng = random.Random(name)
-    sky = [
-        f'<defs><linearGradient id="night" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1c0d18"/><stop offset=".5" stop-color="#160a15"/><stop offset="1" stop-color="#0f0711"/></linearGradient>'
-        f'<radialGradient id="rose"><stop offset="0" stop-color="#b7466c" stop-opacity=".34"/><stop offset="1" stop-color="#b7466c" stop-opacity="0"/></radialGradient>'
-        f'<radialGradient id="violet"><stop offset="0" stop-color="#644d8e" stop-opacity=".3"/><stop offset="1" stop-color="#644d8e" stop-opacity="0"/></radialGradient>'
-        f'<clipPath id="page"><rect width="{width}" height="{height}" rx="22"/></clipPath></defs>',
-        f'<g clip-path="url(#page)"><rect width="{width}" height="{height}" fill="url(#night)"/>',
-    ]
-    # Drifts of nebula down the page, alternating sides, so no two cards share the same patch of sky.
-    for index, top in enumerate(range(60, height + 200, 430)):
-        left = index % 2 == 0
-        sky.append(f'<ellipse cx="{rng.uniform(60, 300) if left else rng.uniform(580, 830):.0f}" cy="{top + rng.uniform(-60, 60):.0f}" rx="{rng.uniform(300, 420):.0f}" ry="{rng.uniform(190, 260):.0f}" fill="url(#{"rose" if index % 3 else "violet"})"/>')
-    for index in range(int(width * height / 2100)):
-        x, yy = round(rng.uniform(4, width - 4), 1), round(rng.uniform(4, height - 4), 1)
-        twinkle = f' class="tw" style="animation-delay:-{index % 13 * 0.5:.1f}s"' if index % 9 == 0 else ""
-        if rng.random() < 0.26:
-            sky.append(sparkle(x, yy, round(rng.uniform(2, 5.5), 1), "#ffc3d7", rng.uniform(0.14, 0.4), twinkle))
-        else:
-            sky.append(f'<circle cx="{x}" cy="{yy}" r="{rng.uniform(0.5, 1.4):.1f}" fill="#ffc3d7" opacity="{rng.uniform(0.14, 0.42):.2f}"{twinkle}/>')
-    sky.append(f'</g><rect x="0.5" y="0.5" width="{width - 1}" height="{height - 1}" rx="22" fill="none" stroke="{LINE}"/>')
-    write(name, width, height, "".join(sky) + "".join(placed), label, "".join(css))
+    t, b = (22 if round_top else 0), (22 if round_bottom else 0)
+    outline = f"M0 {t}Q0 0 {t} 0H{width - t}Q{width} 0 {width} {t}V{height - b}Q{width} {height} {width - b} {height}H{b}Q0 {height} 0 {height - b}Z"
+    body = f'<clipPath id="page"><path d="{outline}"/></clipPath><g clip-path="url(#page)">{night(width, height, name)}</g>' + "".join(placed)
+    write(name, width, height, body, label, "".join(css))
 
 
-def button(name, text, primary):
-    """A link button: filled pink for the main one, glass for the rest."""
+def button(text, primary):
+    """A link button as (width, markup): filled pink for the main one, glass for the rest."""
     width, height = round(len(text) * 7.6 + 58), 40
     if primary:
-        shape = f'<defs><linearGradient id="fill" x1="0" x2="1"><stop offset="0" stop-color="#ffd3e0"/><stop offset="1" stop-color="{ROSE}"/></linearGradient><clipPath id="pill"><rect width="{width}" height="{height}" rx="20"/></clipPath></defs><rect width="{width}" height="{height}" rx="20" fill="url(#fill)"/><g clip-path="url(#pill)"><rect class="shine" x="-40" y="0" width="26" height="{height}" fill="#fff" opacity=".45" transform="skewX(-20)"/></g>'
+        shape = f'<defs><linearGradient id="fill" x1="0" x2="1"><stop offset="0" stop-color="#ffd3e0"/><stop offset="1" stop-color="{ROSE}"/></linearGradient><clipPath id="pill"><rect width="{width}" height="{height}" rx="20"/></clipPath></defs><rect width="{width}" height="{height}" rx="20" fill="url(#fill)"/><g clip-path="url(#pill)"><rect class="shine" x="-40" y="0" width="26" height="{height}" fill="#fff" opacity=".45"/></g>'
         ink, star = "#24121c", "#8e3a5b"
     else:
-        shape = f'<rect x="0.5" y="0.5" width="{width - 1}" height="{height - 1}" rx="19.5" fill="#1f1018" stroke="{PINK}" stroke-opacity=".55"/>'
+        shape = f'<rect x="0.5" y="0.5" width="{width - 1}" height="{height - 1}" rx="19.5" fill="#ffffff" fill-opacity=".05" stroke="{PINK}" stroke-opacity=".55"/>'
         ink, star = "#ffe6ef", PINK
-    body = shape + sparkle(24, 20, 7, star, 1, ' class="tw"') + f'<text x="40" y="25" font-family="{SANS}" font-size="13.5" font-weight="700" fill="{ink}">{escape(text)}</text>'
-    css = f"@keyframes shine{{0%,70%{{transform:translateX(0) skewX(-20deg)}}100%{{transform:translateX({width + 90}px) skewX(-20deg)}}}}.shine{{animation:shine 4.5s ease-in infinite}}@media(prefers-reduced-motion:reduce){{.shine{{animation:none}}}}"
-    write(name, width, height, body, text, css)
+    return width, shape + sparkle(24, 20, 7, star, 1, ' class="tw"') + f'<text x="40" y="25" font-family="{SANS}" font-size="13.5" font-weight="700" fill="{ink}">{escape(text)}</text>'
+
+
+def menu(links):
+    """The link menu, cut into one image per button so each can be its own link.
+
+    The slices carry the same sky and are sized in percentages that add up to a full row, so
+    in the README they sit edge to edge between the two posters and read as part of them.
+    Returns the README markup.
+    """
+    total, height, limit = 888, 60, 800
+    rows, current, used = [], [], 0
+    for text, url, primary in links:
+        width, body = button(text, primary)
+        if current and used + width + 16 > limit:
+            rows.append(current)
+            current, used = [], 0
+        current.append((text, url, width, body))
+        used += width + 16
+    rows.append(current)
+    # Same number of rows, but shared out evenly so the last one is not a lone button.
+    items = [item for row in rows for item in row]
+    per_row = math.ceil(len(items) / len(rows))
+    rows = [items[index:index + per_row] for index in range(0, len(items), per_row)]
+    html = []
+    css = "@keyframes shine{0%,70%{transform:translateX(0)}100%{transform:translateX(320px)}}.shine{animation:shine 4.5s ease-in infinite}@media(prefers-reduced-motion:reduce){.shine{animation:none}}"
+    for r, row in enumerate(rows):
+        # Buttons sit together in the middle of the row; the two end slices take up the slack.
+        edge = (total - sum(width + 16 for _, _, width, _ in row)) / 2
+        spans = [width + 16 + (edge if i == 0 else 0) + (edge if i == len(row) - 1 else 0) for i, (_, _, width, _) in enumerate(row)]
+        # Two-decimal percentages that stop just short of 100, so rounding can never wrap a row.
+        shares = [round(span / total * 100, 2) for span in spans]
+        shares[-1] = round(99.98 - sum(shares[:-1]), 2)
+        for i, ((text, url, width, body), share) in enumerate(zip(row, shares)):
+            slice_width = round(total * share / 100, 2)
+            file = f"menu-{r}-{i}.svg"
+            x = 8 + (edge if i == 0 else 0)
+            inner = f'{night(round(slice_width) + 2, height, f"menu{r}{i}", nebulae=False)}<svg x="{x:.1f}" y="10" width="{width}" height="40" viewBox="0 0 {width} 40">{body}</svg>'
+            write(file, slice_width, height, inner, text, css)
+            html.append(f'<a href="{url}"><img src="assets/{file}" width="{share}%" align="top" alt="{escape(text)}"></a>')
+    return "".join(html)
+
+
+def milestones(calendar, repos):
+    """How far along the next round numbers are, each as a comet closing in on its target."""
+    width, height = 840, 124
+
+    def next_target(value, steps=(5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000)):
+        return next((step for step in steps if step > value), value + 1)
+
+    tracks = [("contributions this year", calendar["totalContributions"]), ("stars", sum(repo["stargazerCount"] for repo in repos))]
+    body = [backdrop(width, height)]
+    body.append(f'<text x="26" y="34" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">NEXT MILESTONES</text>')
+    for index, (caption, value) in enumerate(tracks):
+        target = next_target(value)
+        x, y, span = 26 + index * 406, 78, 370
+        reached = span * value / target
+        body.append(f'<path d="M{x} {y}H{x + span}" stroke="{PINK}" stroke-opacity=".22" stroke-width="3" stroke-linecap="round"/>')
+        body.append(f'<path d="M{x} {y}H{x + reached:.1f}" stroke="url(#trail)" stroke-width="3" stroke-linecap="round"/>')
+        body.append(sparkle(round(x + reached, 1), y, 8, "#ffe1ea", 1, ' class="tw"'))
+        body.append(sparkle(x + span, y, 5, PINK, 0.55))
+        body.append(f'<text x="{x}" y="{y - 16}" font-family="{SANS}" font-size="17" font-weight="700" fill="{TEXT}">{value}<tspan font-size="12" font-weight="400" fill="{MUTED}"> / {target}</tspan><tspan dx="8" font-family="{MONO}" font-size="10.5" font-weight="400" fill="{MUTED}">{caption}</tspan></text>')
+        body.append(f'<text x="{x + span}" y="{y + 24}" text-anchor="end" font-family="{MONO}" font-size="10.5" fill="{MUTED}">{target - value} to go</text>')
+    body.insert(1, f'<defs><linearGradient id="trail" x1="0" x2="1"><stop offset="0" stop-color="{PINK}" stop-opacity=".1"/><stop offset="1" stop-color="#ffe1ea"/></linearGradient></defs>')
+    svg("milestones.svg", width, height, "".join(body), "Next milestones: " + ", ".join(f"{value} of {next_target(value)} {caption}" for caption, value in tracks))
 
 
 def ticker(repos, now):
@@ -221,6 +288,9 @@ def card(repo):
         body.append(f'<text x="26" y="{76 + row * 19}" font-family="{SANS}" font-size="12.5" fill="#cdb9c3">{escape(line)}</text>')
     body.append(f'<circle cx="31" cy="134" r="5" fill="{language["color"] or PINK}"/>')
     body.append(f'<text x="43" y="138" font-family="{MONO}" font-size="11" fill="{MUTED}">{escape(language["name"])}</text>')
+    release = (repo["releases"]["nodes"] or [None])[0]
+    if release:
+        body.append(f'<text x="{52 + len(language["name"]) * 6.8:.0f}" y="138" font-family="{MONO}" font-size="11" fill="{PINK}">{escape(release["tagName"])}</text>')
     if repo["stargazerCount"]:
         body.append(f'<text x="{width - 26}" y="138" text-anchor="end" font-family="{MONO}" font-size="11" fill="{PINK}">✦ {repo["stargazerCount"]}</text>')
     svg(f"repo-{repo['name']}.svg", width, height, "".join(body), f"{repo['name']}: {description}")
@@ -614,34 +684,27 @@ def main():
     toolkit()
     aurora()
 
+    milestones(calendar, repos)
+
     name = user["name"] or LOGIN
-    poster("sky-top.svg", [["header.svg"], ["terminal.svg"]], f"{name}: desktop tools and small universes. " + CARDS["terminal.svg"][4])
+    poster("sky-top.svg", [["header.svg"], ["terminal.svg"]], f"{name}: desktop tools and small universes. " + CARDS["terminal.svg"][4], round_top=True)
     cards = [f"repo-{repo['name']}.svg" for repo in repos]
     rows = [cards[index:index + 2] for index in range(0, len(cards), 2)]
     rows += [["orbits.svg", "moon.svg"], ["galaxy.svg", "signal.svg"], ["blackhole.svg", "radar.svg"]]
-    rows += [[key] for key in ("mission.svg", "sky.svg", "launches.svg", "ticker.svg", "languages.svg", "toolkit.svg", "aurora.svg")]
-    poster("sky-main.svg", rows, ". ".join(CARDS[key][4] for row in rows for key in row))
+    rows += [[key] for key in ("mission.svg", "milestones.svg", "sky.svg", "launches.svg", "ticker.svg", "languages.svg", "toolkit.svg", "aurora.svg")]
+    poster("sky-main.svg", rows, ". ".join(CARDS[key][4] for row in rows for key in row), round_bottom=True)
 
-    # Buttons carry the links, since a poster is a single image. One per repository, added automatically.
-    links = [("btn-discord.svg", "Join my Discord", DISCORD, True)]
-    links += [(f"btn-{repo['name']}.svg", repo["name"], repo["url"], False) for repo in repos]
-    for file, text, _, primary in links:
-        button(file, text, primary)
-    buttons = "\n".join(f'  <a href="{url}"><img src="assets/{file}" height="40" alt="{escape(text)}"></a>' for file, text, url, _ in links)
-    readme = f"""<p align="center"><img src="assets/sky-top.svg" width="100%" alt="{escape(name)}: desktop tools and small universes"></p>
-
-<p align="center">
-{buttons}
-</p>
-
-<p align="center"><img src="assets/sky-main.svg" width="100%" alt="Projects, orbits, tonight's moon, a contribution galaxy, streaks, recent releases and commits, drawn as one night sky"></p>
-
-<p align="center"><img src="https://komarev.com/ghpvc/?username={LOGIN}&label=visitors&color=e7a0b9&style=flat-square" alt="Profile views"></p>
-
-<sub>Both posters and every button are SVGs drawn by <a href="build.py"><code>build.py</code></a> from the GitHub API and redrawn every three hours: a new repository gets its own card, planet, radar blip and button without any editing.</sub>
-"""
+    # The menu carries the links, since a poster is a single image. One button per repository, added automatically.
+    links = [(DISCORD[0], DISCORD[1], True)] + [(repo["name"], repo["url"], False) for repo in repos]
+    # One paragraph with no whitespace between the tags: any gap would let the page show through.
+    readme = (
+        f'<p><img src="assets/sky-top.svg" width="100%" align="top" alt="{escape(name)}: desktop tools and small universes">'
+        f"{menu(links)}"
+        '<img src="assets/sky-main.svg" width="100%" align="top" alt="Projects, orbits, tonight\'s moon, a contribution galaxy, streaks, milestones, recent releases and commits, drawn as one night sky"></p>\n\n'
+        '<sub>The sky and every button are SVGs drawn by <a href="build.py"><code>build.py</code></a> from the GitHub API and redrawn every three hours: a new repository gets its own card, planet, radar blip and menu button without any editing.</sub>\n'
+    )
     (Path(__file__).parent / "README.md").write_text(readme, encoding="utf-8", newline="\n")
-    print("drew", len(CARDS), "cards and", len(links), "buttons for", ", ".join(repo["name"] for repo in repos))
+    print("drew", len(CARDS), "cards and", len(links), "menu buttons for", ", ".join(repo["name"] for repo in repos))
 
 
 if __name__ == "__main__":
