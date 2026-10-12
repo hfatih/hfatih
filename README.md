@@ -13,10 +13,16 @@
 
 <img src="assets/galaxy.svg" width="49.5%" alt="The year as a spiral galaxy, one bright star per contribution"> <img src="assets/signal.svg" width="49.5%" alt="Contributions by weekday">
 
+<img src="assets/blackhole.svg" width="49.5%" alt="Total code size, circling a black hole"> <img src="assets/radar.svg" width="49.5%" alt="Radar of repositories with stars, forks and followers">
+
+<img src="assets/mission.svg" width="100%" alt="The last thirty days as a flight path, with streaks">
+
 <img src="assets/sky.svg" width="100%" alt="Contributions over the last year, drawn as a night sky">
 
 <img src="assets/launches.svg" width="100%" alt="Latest releases">
 
 <img src="assets/languages.svg" width="100%" alt="Languages across public repositories">
+
+<img src="assets/aurora.svg" width="100%" alt="Clear skies.">
 
 <sub>Every card here is an SVG drawn by <a href="build.py"><code>build.py</code></a> from the GitHub API and redrawn every three hours. Planets are repositories sized by their code, the moon is tonight's real phase, and in the sky a quiet day is a dim dot while a busy day is a bright star.</sub>

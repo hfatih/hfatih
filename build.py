@@ -10,7 +10,7 @@ import os
 import random
 import subprocess
 import urllib.request
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 
@@ -24,12 +24,12 @@ PINK, ROSE, TEXT, MUTED, LINE = "#f0abc5", "#e7a0b9", "#f5f5f6", "#a48a97", "#5a
 FALLBACK = {"samanyolu3d": "Interactive 3D galaxy simulation and procedural galactic visualization in your browser."}
 
 QUERY = """query($login: String!) { user(login: $login) {
-  name createdAt
+  name createdAt followers { totalCount }
   contributionsCollection { contributionCalendar { totalContributions
     weeks { contributionDays { contributionCount date } } } }
   repositories(first: 50, ownerAffiliations: OWNER, privacy: PUBLIC, isFork: false,
                orderBy: {field: STARGAZERS, direction: DESC}) { nodes {
-    name description stargazerCount url pushedAt
+    name description stargazerCount forkCount url pushedAt
     releases(first: 1, orderBy: {field: CREATED_AT, direction: DESC}) { nodes { tagName publishedAt } }
     primaryLanguage { name color }
     languages(first: 10, orderBy: {field: SIZE, direction: DESC}) { edges { size node { name color } } } } } } }"""
@@ -318,6 +318,120 @@ def signal(calendar):
     svg("signal.svg", width, height, "".join(body), "Contributions by weekday: " + ", ".join(f"{name} {value}" for name, value in zip(names, totals)), css)
 
 
+def code_size(repo):
+    return sum(edge["size"] for edge in repo["languages"]["edges"])
+
+
+def blackhole(repos):
+    """All the code that has fallen in so far, circling a black hole."""
+    width, height = 412, 260
+    cx, cy = 290, 128
+    total = sum(code_size(repo) for repo in repos)
+    heaviest = max(repos, key=code_size) if repos else None
+    body = [backdrop(width, height, "blackhole", 18)]
+    body.append(f'<defs><linearGradient id="disk" x1="0" x2="1"><stop offset="0" stop-color="{ROSE}" stop-opacity=".15"/><stop offset=".5" stop-color="#fff3f7"/><stop offset="1" stop-color="{ROSE}" stop-opacity=".15"/></linearGradient><radialGradient id="halo"><stop offset=".55" stop-color="{PINK}" stop-opacity="0"/><stop offset=".8" stop-color="{PINK}" stop-opacity=".22"/><stop offset="1" stop-color="{PINK}" stop-opacity="0"/></radialGradient></defs>')
+    rings = [(96, 21, 2.4, 7), (80, 17, 2, 5.5), (64, 13, 1.6, 4)]
+
+    def arcs(front):
+        sweep = 0 if front else 1  # the near half of the disk passes in front of the hole
+        return "".join(
+            f'<path class="flow" d="M{cx - rx} {cy}A{rx} {ry} 0 0 {sweep} {cx + rx} {cy}" fill="none" stroke="url(#disk)" stroke-width="{w}" stroke-linecap="round" stroke-dasharray="14 9" style="animation-duration:{speed}s"/>'
+            for rx, ry, w, speed in rings
+        )
+
+    body.append(f'<g transform="rotate(-16 {cx} {cy})">{arcs(False)}</g>')
+    body.append(f'<circle cx="{cx}" cy="{cy}" r="52" fill="url(#halo)"/>')
+    body.append(f'<circle cx="{cx}" cy="{cy}" r="31" fill="#07040a" stroke="#ffe1ea" stroke-width="1.6"/>')
+    body.append(f'<g transform="rotate(-16 {cx} {cy})">{arcs(True)}</g>')
+    body.append(f'<text x="26" y="38" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">CODE MASS</text>')
+    body.append(f'<text x="26" y="118" font-family="{SANS}" font-size="38" font-weight="700" letter-spacing="-1" fill="{TEXT}">{total / 1024:,.0f}<tspan dx="6" font-size="15" font-weight="600" fill="{PINK}">KB</tspan></text>')
+    body.append(f'<text x="26" y="142" font-family="{MONO}" font-size="10.5" fill="{MUTED}">across {len(repos)} repositories</text>')
+    if heaviest:
+        body.append(f'<text x="26" y="{height - 22}" font-family="{SANS}" font-size="11" fill="{MUTED}">Heaviest: {escape(heaviest["name"])}, {code_size(heaviest) / 1024:,.0f} KB.</text>')
+    css = "@keyframes flow{to{stroke-dashoffset:-46}}.flow{animation:flow linear infinite}@media(prefers-reduced-motion:reduce){.flow{animation:none}}"
+    svg("blackhole.svg", width, height, "".join(body), f"{total / 1024:,.0f} KB of code across {len(repos)} repositories, circling a black hole", css)
+
+
+def radar(user, repos, now):
+    """Repositories as radar blips: closer to the centre means pushed more recently, bigger means more stars."""
+    width, height = 412, 260
+    cx, cy, reach = 124, 136, 92
+    rng = random.Random("radar")
+    body = [backdrop(width, height, "radar-bg", 10)]
+    body.append(f'<defs><linearGradient id="sweep" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="{PINK}" stop-opacity=".5"/><stop offset="1" stop-color="{PINK}" stop-opacity="0"/></linearGradient></defs>')
+    for radius in (reach, reach * 2 / 3, reach / 3):
+        body.append(f'<circle cx="{cx}" cy="{cy}" r="{radius:.0f}" fill="none" stroke="{LINE}"/>')
+    body.append(f'<path d="M{cx - reach} {cy}H{cx + reach}M{cx} {cy - reach}V{cy + reach}" stroke="{LINE}"/>')
+    body.append(f'<g class="spin" style="transform-origin:{cx}px {cy}px;animation-duration:5s"><path d="M{cx} {cy}L{cx + reach} {cy}A{reach} {reach} 0 0 0 {cx + reach * 0.5:.1f} {cy - reach * 0.866:.1f}Z" fill="url(#sweep)"/><path d="M{cx} {cy}H{cx + reach}" stroke="#ffe1ea" stroke-width="1.2"/></g>')
+    for index, repo in enumerate(repos[:8]):
+        age = (now - datetime.fromisoformat(repo["pushedAt"].replace("Z", "+00:00"))).days
+        distance = 14 + min(1.0, age / 60) * (reach - 24)
+        angle = rng.uniform(0, 2 * math.pi)
+        x, y = round(cx + distance * math.cos(angle), 1), round(cy + distance * math.sin(angle), 1)
+        body.append(f'<circle class="tw" cx="{x}" cy="{y}" r="{3 + min(4, repo["stargazerCount"] * 1.5):.1f}" fill="#ffe1ea" style="animation-delay:-{index * 0.8:.1f}s"/>')
+    body.append(f'<text x="26" y="38" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">RADAR</text>')
+    rows = [(sum(repo["stargazerCount"] for repo in repos), "stars"), (sum(repo["forkCount"] for repo in repos), "forks"), (user["followers"]["totalCount"], "followers")]
+    rows = [(value, caption[:-1] if value == 1 else caption) for value, caption in rows]
+    for index, (value, caption) in enumerate(rows):
+        body.append(f'<text x="252" y="{104 + index * 34}" font-family="{SANS}" font-size="22" font-weight="700" fill="{TEXT}">{value}<tspan dx="8" font-family="{MONO}" font-size="10.5" font-weight="400" fill="{MUTED}">{caption}</tspan></text>')
+    body.append(f'<text x="252" y="{height - 34}" font-family="{SANS}" font-size="11" fill="{MUTED}">Near the centre: pushed</text><text x="252" y="{height - 20}" font-family="{SANS}" font-size="11" fill="{MUTED}">recently. Bigger: more stars.</text>')
+    svg("radar.svg", width, height, "".join(body), f"Radar: {rows[0][0]} stars, {rows[1][0]} forks, {rows[2][0]} followers")
+
+
+def mission(calendar, today):
+    """The last thirty days as a flight path, with streaks."""
+    width, height = 840, 168
+    days = {day["date"]: day["contributionCount"] for week in calendar["weeks"] for day in week["contributionDays"]}
+    ordered = [count for key, count in sorted(days.items()) if key <= today.isoformat()]
+    longest = run = 0
+    for count in ordered:
+        run = run + 1 if count else 0
+        longest = max(longest, run)
+    current = 0
+    for count in reversed(ordered[:-1] if ordered and not ordered[-1] else ordered):  # today may still be empty
+        if not count:
+            break
+        current += 1
+    since = next((index for index, count in enumerate(reversed(ordered)) if count), None)
+    body = [backdrop(width, height, "mission", 30)]
+    body.append(f'<text x="28" y="38" font-family="{MONO}" font-size="12.5" fill="{TEXT}"><tspan fill="{PINK}">{LOGIN}@github</tspan> ~ $ ./mission --last-30-days</text>')
+    left, right, y = 44, width - 70, 86
+    step = (right - left) / 29
+    body.append(f'<path d="M{left} {y}H{right}" stroke="{ROSE}" stroke-width="1" stroke-dasharray="2 6" opacity=".7"/>')
+    for index in range(30):
+        day = today - timedelta(days=29 - index)
+        count = days.get(day.isoformat(), 0)
+        x = round(left + index * step, 1)
+        if count:
+            body.append(sparkle(x, y, min(9, 4 + count), "#ffe1ea", 1, f' class="tw" style="animation-delay:-{index * 0.3:.1f}s"'))
+        else:
+            body.append(f'<circle cx="{x}" cy="{y}" r="1.6" fill="#ffc3d7" opacity=".35"/>')
+        if index % 7 == 1 or index == 29:
+            body.append(f'<text x="{x}" y="{y + 24}" text-anchor="middle" font-family="{MONO}" font-size="9.5" fill="{MUTED}">{"today" if index == 29 else day.strftime("%b %d")}</text>')
+    rx = right + 22
+    body.append(f'<g class="hover"><path class="flame" d="M{rx - 9} {y - 3.5}L{rx - 24} {y}L{rx - 9} {y + 3.5}Z" fill="#e8b86d" style="transform-origin:{rx - 9}px {y}px"/><path d="M{rx - 10} {y - 6}H{rx + 6}Q{rx + 17} {y} {rx + 6} {y + 6}H{rx - 10}Z" fill="#ffe1ea"/><path d="M{rx - 10} {y - 6}L{rx - 16} {y - 11}V{y + 11}L{rx - 10} {y + 6}Z" fill="{ROSE}"/><circle cx="{rx + 3}" cy="{y}" r="2.6" fill="#1f1018"/></g>')
+    last = "today" if since == 0 else "yesterday" if since == 1 else f"{since} days ago" if since is not None else "not yet"
+    stats = [(f"{current} d", "current streak"), (f"{longest} d", "longest streak this year"), (last, "last contribution")]
+    for index, (value, caption) in enumerate(stats):
+        body.append(f'<text x="{30 + index * 268}" y="{height - 20}" font-family="{SANS}" font-size="20" font-weight="700" fill="{TEXT}">{value}<tspan dx="8" font-family="{MONO}" font-size="10.5" font-weight="400" fill="{MUTED}">{caption}</tspan></text>')
+    css = "@keyframes flame{0%,100%{transform:scaleX(1)}50%{transform:scaleX(.55)}}.flame{animation:flame .28s ease-in-out infinite}@keyframes hover{0%,100%{transform:translateY(-1.5px)}50%{transform:translateY(1.5px)}}.hover{animation:hover 2.4s ease-in-out infinite}@media(prefers-reduced-motion:reduce){.flame,.hover{animation:none}}"
+    svg("mission.svg", width, height, "".join(body), f"Last 30 days: current streak {current} days, longest streak {longest} days, last contribution {last}", css)
+
+
+def aurora():
+    """A closing band of slow aurora light. Decorative."""
+    width, height, period = 840, 96, 280
+    body = [backdrop(width, height, "aurora", 26)]
+    body.append(f'<clipPath id="band"><rect x="1" y="1" width="{width - 2}" height="{height - 2}" rx="15"/></clipPath><g clip-path="url(#band)">')
+    for index, (color, base, swing, speed) in enumerate((("#bca4dd", 62, 13, 19), (PINK, 54, 17, 13), ("#ffe1ea", 68, 9, 27))):
+        points = " ".join(f"{x},{base + swing * math.sin(2 * math.pi * x / period + index):.1f}" for x in range(-period, width + period + 1, 14))
+        body.append(f'<polyline class="drift" points="{points}" fill="none" stroke="{color}" stroke-width="{10 - index * 3}" stroke-linecap="round" opacity="{0.16 + index * 0.07:.2f}" style="animation-duration:{speed}s"/>')
+    body.append("</g>")
+    body.append(f'<text x="{width / 2}" y="44" text-anchor="middle" font-family="{SERIF}" font-size="21" font-style="italic" fill="{TEXT}">clear skies.</text>')
+    css = f"@keyframes drift{{to{{transform:translateX({period}px)}}}}.drift{{animation:drift linear infinite}}@media(prefers-reduced-motion:reduce){{.drift{{animation:none}}}}"
+    svg("aurora.svg", width, height, "".join(body), "Clear skies.", css)
+
+
 SYNODIC = 29.530588853
 PHASES = ["New moon", "Waxing crescent", "First quarter", "Waxing gibbous", "Full moon", "Waning gibbous", "Last quarter", "Waning crescent"]
 
@@ -390,6 +504,11 @@ def main():
     galaxy(calendar)
     signal(calendar)
     orbits(repos)
+    now = datetime.now(timezone.utc)
+    blackhole(repos)
+    radar(user, repos, now)
+    mission(calendar, now.date())
+    aurora()
     moon(datetime.now(timezone.utc))
     launches(repos)
     # Keep the README's project grid in step with the repositories that exist.
@@ -398,7 +517,7 @@ def main():
     grid = "\n".join(f'<a href="{repo["url"]}"><img src="assets/repo-{repo["name"]}.svg" width="49.5%" alt="{escape(repo["name"])}"></a>' for repo in repos)
     tail = rest.partition("<!-- projects:end -->")[2]
     readme.write_text(f"{before}<!-- projects:start -->\n{grid}\n<!-- projects:end -->{tail}", encoding="utf-8", newline="\n")
-    print("drew", 9 + len(repos), "cards for", ", ".join(repo["name"] for repo in repos))
+    print("drew", 13 + len(repos), "cards for", ", ".join(repo["name"] for repo in repos))
 
 
 if __name__ == "__main__":
