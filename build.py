@@ -30,6 +30,10 @@ PINK, ROSE, TEXT, MUTED, LINE = "#f0abc5", "#e7a0b9", "#f5f5f6", "#a48a97", "#5a
 # Descriptions for repositories whose GitHub description is empty.
 # Shown as the first button. Everything else on the page comes from the GitHub API.
 DISCORD = ("Talk to me on Discord", "https://discordapp.com/users/268797596280160259")
+# Profile views are counted by komarev.com: an invisible pixel in the README counts each visit,
+# and every redraw reads the total back to draw it in the observers card.
+COUNTER = f"https://komarev.com/ghpvc/?username={LOGIN}"
+VISITS = OUT / "observers.json"  # daily totals, kept in the repository so the card can show a trend
 SKY = "#150a14"  # the one background colour every image shares, so they join without a seam
 # What the public repositories are built with, per their own READMEs.
 TOOLKIT = ["Rust", "TypeScript", "React", "Tauri 2", "SQLite", "WebGL 2", "GLSL", "Three.js", "C#", "Node.js"]
@@ -1075,6 +1079,79 @@ def trail(repos, now):
     svg("trail.svg", width, height, "".join(body), "Releases in the last twelve months: " + ", ".join(f"{repo['name']} {repo['releases']['totalCount']}" for repo in shown))
 
 
+def read_counter():
+    """The visit total as komarev.com reports it. Reading it counts as one more visit."""
+    request = urllib.request.Request(f"{COUNTER}&style=flat", headers={"User-Agent": LOGIN})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        badge = response.read().decode("utf-8")
+    return int(re.findall(r">\s*([\d,]+)\s*<", badge)[-1].replace(",", ""))
+
+
+def observe(now):
+    """Reads the counter and logs today's total; returns the log as {day: visits so far}.
+
+    Each of these reads is a visit too, so the log keeps count of them and takes them back off.
+    """
+    try:
+        log = json.loads(VISITS.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        log = {"reads": 0, "days": {}}
+    raw = attempt("profile views", read_counter)
+    if raw is not None:
+        log["reads"] += 1
+        today = (now + timedelta(hours=UTC_OFFSET)).date().isoformat()
+        log["days"][today] = max(0, raw - log["reads"])
+        log["days"] = dict(sorted(log["days"].items())[-90:])
+        VISITS.write_text(json.dumps(log, indent=1) + "\n", encoding="utf-8", newline="\n")
+    return log["days"]
+
+
+def observers(days, now):
+    """Visits to this profile: the total so far and the last thirty days, one bar a day."""
+    width, height = 840, 148
+    today = (now + timedelta(hours=UTC_OFFSET)).date()
+    body = [backdrop(width, height)]
+    body.append(f'<text x="26" y="34" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">OBSERVERS</text>')
+    body.append(f'<text x="{width - 28}" y="34" text-anchor="end" font-family="{SANS}" font-size="11" fill="{MUTED}">Everyone who has looked up at this sky, one bar a day.</text>')
+    if not days:
+        body.append(f'<text x="26" y="88" font-family="{SERIF}" font-size="21" font-style="italic" fill="{TEXT}">the telescope is warming up</text>')
+        body.append(f'<text x="26" y="112" font-family="{MONO}" font-size="10.5" fill="{MUTED}">visits show here from the next redraw</text>')
+        svg("observers.svg", width, height, "".join(body), "Profile views: counting starts with the next redraw")
+        return
+    ordered = sorted(days.items())
+    total, first = ordered[-1][1], date.fromisoformat(ordered[0][0])
+    # A day's visits are its total less the last total logged before it. The counter starts at
+    # zero, so the first day's total is all its own; a day without a reading shows as quiet.
+    daily = []
+    for back in range(29, -1, -1):
+        day = (today - timedelta(days=back)).isoformat()
+        before = [count for key, count in ordered if key < day]
+        daily.append(None if day < ordered[0][0] else max(0, days[day] - (before[-1] if before else 0)) if day in days else 0)
+    week = sum(count or 0 for count in daily[-7:])
+    body.append(f'<text x="26" y="86" font-family="{SANS}" font-size="34" font-weight="700" letter-spacing="-1" fill="{TEXT}">{total:,}</text>')
+    body.append(f'<text x="26" y="108" font-family="{MONO}" font-size="10.5" fill="{MUTED}">visits since {first.strftime("%b %d, %Y")}</text>')
+    body.append(f'<text x="26" y="126" font-family="{MONO}" font-size="10.5" fill="{PINK}">+{week:,} in the last 7 days</text>')
+    left, right, base, tallest = 300, width - 34, 114, 40
+    step = (right - left) / 29
+    peak = max([count or 0 for count in daily] + [1])
+    body.append(f'<path d="M{left - 8} {base + 0.5}H{right + 8}" stroke="{LINE}"/>')
+    for index, count in enumerate(daily):
+        x = round(left + index * step, 1)
+        if count:
+            bar = 3 + tallest * count / peak
+            newest = index == 29
+            busiest = count == peak
+            body.append(f'<rect x="{x - 3.5}" y="{base - bar:.1f}" width="7" height="{bar:.1f}" rx="3.5" fill="{"#ffe1ea" if newest or busiest else PINK}" opacity="{1 if newest or busiest else 0.4 + 0.5 * count / peak:.2f}"/>')
+            if busiest:
+                body.append(sparkle(x, round(base - bar - 9, 1), 5, "#ffe1ea", 1, ' class="tw"'))
+        else:
+            body.append(f'<circle cx="{x}" cy="{base - 2}" r="1.4" fill="{PINK}" opacity="{0.35 if count == 0 else 0.12}"/>')
+    for index in (0, 29):
+        day = today - timedelta(days=29 - index)
+        body.append(f'<text x="{round(left + index * step, 1)}" y="{base + 18}" text-anchor="middle" font-family="{MONO}" font-size="9.5" fill="{MUTED}">{"today" if index == 29 else day.strftime("%b %d")}</text>')
+    svg("observers.svg", width, height, "".join(body), f"Profile views: {total:,} since {first.strftime('%B %d, %Y')}, {week:,} in the last 7 days")
+
+
 def stargazers(repos):
     """The latest people to star something, by name."""
     fans = sorted(((edge["starredAt"], edge["node"]["login"], repo["name"]) for repo in repos for edge in repo["stargazers"]["edges"] if edge["node"]["login"].lower() != LOGIN), reverse=True)[:6]
@@ -1194,13 +1271,14 @@ def main():
     control(repos, now)
     trail(repos, now)
     stargazers(repos)
+    observers(observe(now), now)
 
     name = NAME
     top = poster("sky-top.svg", [["header.svg"], ["terminal.svg"]], f"{name}: desktop tools and small universes. " + CARDS["terminal.svg"][4], round_top=True)
     cards = [f"repo-{repo['name']}.svg" for repo in repos]
     rows = [cards[index:index + 2] for index in range(0, len(cards), 2)]
     rows += [["orbits.svg", "moon.svg"], ["galaxy.svg", "signal.svg"], ["blackhole.svg", "radar.svg"], ["hours.svg", "logbook.svg"], ["earth.svg", "meteors.svg"], ["daylight.svg", "planets.svg"]]
-    rows += [[key] for key in ("control.svg", "mission.svg", "milestones.svg", "sky.svg", "launches.svg", "trail.svg", "ticker.svg", "cargo.svg", "languages.svg", "spectra.svg", "toolkit.svg", "stargazers.svg", "aurora.svg")]
+    rows += [[key] for key in ("control.svg", "mission.svg", "milestones.svg", "sky.svg", "launches.svg", "trail.svg", "ticker.svg", "cargo.svg", "languages.svg", "spectra.svg", "toolkit.svg", "stargazers.svg", "observers.svg", "aurora.svg")]
     sky_main = poster("sky-main.svg", rows, ". ".join(CARDS[key][4].rstrip(". ") for row in rows for key in row), round_bottom=True)
 
     # The menu carries the links, since a poster is a single image. One button per repository, added automatically.
@@ -1210,7 +1288,8 @@ def main():
         f'<p><img src="assets/{top}" width="100%" align="top" alt="{escape(name)}: desktop tools and small universes">'
         f"{menu(links)}"
         f'<img src="assets/{sky_main}" width="100%" align="top" alt="Projects, orbits, tonight\'s moon and planets, Istanbul daylight, a contribution galaxy, streaks, milestones, recent releases and commits, drawn as one night sky"></p>\n\n'
-        '<sub>The sky and every button are SVGs drawn by <a href="build.py"><code>build.py</code></a> from the GitHub API and redrawn every three hours: a new repository gets its own card, planet, radar blip and menu button without any editing.</sub>\n'
+        '<sub>The sky and every button are SVGs drawn by <a href="build.py"><code>build.py</code></a> from the GitHub API and redrawn every three hours: a new repository gets its own card, planet, radar blip and menu button without any editing.</sub>'
+        f'<img src="{COUNTER}&amp;style=pixel" alt="">\n'
     )
     (Path(__file__).parent / "README.md").write_text(readme, encoding="utf-8", newline="\n")
     print("drew", len(CARDS), "cards and", len(links), "menu buttons for", ", ".join(repo["name"] for repo in repos))
