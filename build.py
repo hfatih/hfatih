@@ -1097,7 +1097,7 @@ def trail(repos, now):
 
 
 def read_counter():
-    """The visit total as komarev.com reports it. Reading it counts as one more visit."""
+    """The visit total as komarev.com reports it."""
     request = urllib.request.Request(f"{COUNTER}&style=flat", headers={"User-Agent": LOGIN})
     with urllib.request.urlopen(request, timeout=30) as response:
         badge = response.read().decode("utf-8")
@@ -1107,20 +1107,20 @@ def read_counter():
 def observe(now):
     """Reads the counter and logs today's total; returns the log as {day: visits so far}.
 
-    Each of these reads is a visit too, so the log keeps count of them and takes them back off.
+    The total is komarev.com's own figure. Reading it does not reliably add a visit (the count
+    stood still across several redraws), so nothing is taken off; a total never goes back down.
     """
     try:
-        log = json.loads(VISITS.read_text(encoding="utf-8"))
-    except (FileNotFoundError, ValueError):
-        log = {"reads": 0, "days": {}}
+        days = json.loads(VISITS.read_text(encoding="utf-8"))["days"]
+    except (FileNotFoundError, ValueError, KeyError):
+        days = {}
     raw = attempt("profile views", read_counter)
     if raw is not None:
-        log["reads"] += 1
         today = (now + timedelta(hours=UTC_OFFSET)).date().isoformat()
-        log["days"][today] = max(0, raw - log["reads"])
-        log["days"] = dict(sorted(log["days"].items())[-90:])
-        VISITS.write_text(json.dumps(log, indent=1) + "\n", encoding="utf-8", newline="\n")
-    return log["days"]
+        days[today] = max([raw] + list(days.values()))
+        days = dict(sorted(days.items())[-90:])
+        VISITS.write_text(json.dumps({"days": days}, indent=1) + "\n", encoding="utf-8", newline="\n")
+    return days
 
 
 def observers(days, now):
