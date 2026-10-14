@@ -598,13 +598,28 @@ def blackhole(repos):
     rings = [(96, 21, 2.4, 7), (80, 17, 2, 5.5), (64, 13, 1.6, 4)]
 
     def arcs(front):
-        sweep = 0 if front else 1  # the near half of the disk passes in front of the hole
+        # The far half runs left to right behind the hole and the near half right to left in front
+        # of it, so the dashes circle the hole instead of all drifting the same way.
         return "".join(
-            f'<path class="flow" d="M{cx - rx} {cy}A{rx} {ry} 0 0 {sweep} {cx + rx} {cy}" fill="none" stroke="url(#disk)" stroke-width="{w}" stroke-linecap="round" stroke-dasharray="14 9" style="animation-duration:{speed}s"/>'
+            f'<path class="flow" d="M{cx + rx if front else cx - rx} {cy}A{rx} {ry} 0 0 1 {cx - rx if front else cx + rx} {cy}" fill="none" stroke="url(#disk)" stroke-width="{w}" stroke-linecap="round" stroke-dasharray="14 9" style="animation-duration:{speed}s"/>'
             for rx, ry, w, speed in rings
         )
 
     body.append(f'<g transform="rotate(-16 {cx} {cy})">{arcs(False)}</g>')
+    # Loose matter spiralling in: each speck follows a spiral laid in the tilted plane of the disk,
+    # circling faster as its orbit tightens, and fades as it reaches the horizon. It is drawn behind
+    # the hole, so it disappears into it.
+    tilt = math.radians(-16)
+    for index, (duration, size) in enumerate(((6.5, 3.2), (8, 2.6), (7.2, 3), (9, 2.4), (5.8, 2.8))):
+        points = []
+        for step in range(73):
+            t = step / 72
+            angle = index * 1.3 + t * 2.6 * 2 * math.pi
+            radius = 100 * (1 - 0.69 * t ** 1.4)
+            x, y = radius * math.cos(angle), radius * math.sin(angle) * 21 / 96
+            points.append(f"{cx + x * math.cos(tilt) - y * math.sin(tilt):.1f} {cy + x * math.sin(tilt) + y * math.cos(tilt):.1f}")
+        timing = f'dur="{duration}s" begin="-{index * 1.7:.1f}s" repeatCount="indefinite"'
+        body.append(f'<circle class="infall" r="{size}" fill="#fff3f7" opacity="0"><animateMotion {timing} path="M{"L".join(points)}"/><animate attributeName="opacity" values="0;.9;.9;0" keyTimes="0;.12;.82;1" {timing}/></circle>')
     body.append(f'<circle cx="{cx}" cy="{cy}" r="52" fill="url(#halo)"/>')
     body.append(f'<circle cx="{cx}" cy="{cy}" r="31" fill="#07040a" stroke="#ffe1ea" stroke-width="1.6"/>')
     body.append(f'<g transform="rotate(-16 {cx} {cy})">{arcs(True)}</g>')
@@ -613,7 +628,7 @@ def blackhole(repos):
     body.append(f'<text x="26" y="142" font-family="{MONO}" font-size="10.5" fill="{MUTED}">across {len(repos)} repositories</text>')
     if heaviest:
         body.append(f'<text x="26" y="{height - 22}" font-family="{SANS}" font-size="11" fill="{MUTED}">Heaviest: {escape(heaviest["name"])}, {code_size(heaviest) / 1024:,.0f} KB.</text>')
-    css = "@keyframes flow{to{stroke-dashoffset:-46}}.flow{animation:flow linear infinite}@media(prefers-reduced-motion:reduce){.flow{animation:none}}"
+    css = "@keyframes flow{to{stroke-dashoffset:-46}}.flow{animation:flow linear infinite}@media(prefers-reduced-motion:reduce){.flow{animation:none}.infall{display:none}}"
     svg("blackhole.svg", width, height, "".join(body), f"{total / 1024:,.0f} KB of code across {len(repos)} repositories, circling a black hole", css)
 
 
@@ -923,6 +938,8 @@ PLANETS = {
     "Mars": ((1.52371034, 0.09339410, 1.84969142, -4.55343205, -23.94362959, 49.55953891), (0.00001847, 0.00007882, -0.00813131, 19140.30268499, 0.44441088, -0.29257343), "#e07a5f"),
     "Jupiter": ((5.20288700, 0.04838624, 1.30439695, 34.39644051, 14.72847983, 100.47390909), (-0.00011607, -0.00013253, -0.00183714, 3034.74612775, 0.21252668, 0.20469106), "#e8b86d"),
     "Saturn": ((9.53667594, 0.05386179, 2.48599187, 49.95424423, 92.59887831, 113.66242448), (-0.00125060, -0.00050991, 0.00193609, 1222.49362201, -0.41897216, -0.28867794), "#d9c38c"),
+    "Uranus": ((19.18916464, 0.04725744, 0.77263783, 313.23810451, 170.95427630, 74.01692503), (-0.00196176, -0.00004397, -0.00242939, 428.48202785, 0.40805281, 0.04240589), "#9fd8e0"),
+    "Neptune": ((30.06992276, 0.00859048, 1.77004347, -55.12002969, 44.96476227, 131.78422574), (0.00026291, 0.00005105, 0.00035372, 218.45945325, -0.32241464, -0.00508664), "#6f8ff0"),
 }
 
 
@@ -956,11 +973,11 @@ def elongation(name, moment):
 def planets(now):
     """The planets where they really are today, seen from above, and which of them show tonight."""
     width, height = 412, 260
-    cx, cy = 302, 134
-    rings = [18, 31, 44, 59, 75, 92]
+    cx, cy = 300, 134
+    rings = [14, 24, 35, 46, 58, 70, 81, 92]  # evenly spaced, not to scale: Neptune is 80 times Mercury's distance
     body = [backdrop(width, height)]
     body.append(f'<text x="26" y="38" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">PLANETS TONIGHT</text>')
-    body.append(f'<circle cx="{cx}" cy="{cy}" r="12" fill="#e8b86d" opacity=".14"/><circle cx="{cx}" cy="{cy}" r="5.5" fill="#e8b86d" class="tw"/>')
+    body.append(f'<circle cx="{cx}" cy="{cy}" r="9" fill="#e8b86d" opacity=".14"/><circle cx="{cx}" cy="{cy}" r="4.5" fill="#e8b86d" class="tw"/>')
     seen = []
     for (name, (_, _, color)), ring in zip(PLANETS.items(), rings):
         x, y, _ = heliocentric(name, now)
@@ -971,20 +988,20 @@ def planets(now):
         body.append(f'<circle cx="{cx}" cy="{cy}" r="{ring}" fill="none" stroke="{ROSE}" stroke-width=".8" stroke-dasharray="1 4" opacity="{0.75 if home else 0.45}"/>')
         if name == "Saturn":
             body.append(f'<ellipse cx="{px}" cy="{py}" rx="7.5" ry="2.4" fill="none" stroke="{color}" stroke-width="1.1" transform="rotate(-20 {px} {py})"/>')
-        body.append(f'<circle cx="{px}" cy="{py}" r="{4.5 if home or name in ("Jupiter", "Saturn") else 3.4}" fill="{color}"/>')
+        body.append(f'<circle cx="{px}" cy="{py}" r="{4.5 if home or name in ("Jupiter", "Saturn") else 4 if name in ("Uranus", "Neptune") else 3.4}" fill="{color}"/>')
         if home:
             body.append(f'<circle cx="{px}" cy="{py}" r="8" fill="none" stroke="{color}" stroke-opacity=".5" class="tw"/>')
         else:
             seen.append((name, color, *elongation(name, now)))
     for index, (name, color, angle, east) in enumerate(seen):
-        y = 70 + index * 24
+        y = 66 + index * 22
         # Within about fifteen degrees of the Sun a planet sets or rises in daylight; Mercury needs more room.
         status = "lost in the Sun" if angle < (18 if name == "Mercury" else 15) else "all night" if angle > 150 else "evening sky" if east else "morning sky"
         visible = status != "lost in the Sun"
         body.append(f'<circle cx="31" cy="{y - 4}" r="4" fill="{color}" opacity="{1 if visible else 0.4}"/>')
         body.append(f'<text x="43" y="{y}" font-family="{SANS}" font-size="12" font-weight="600" fill="{TEXT if visible else MUTED}">{name}<tspan x="108" font-family="{MONO}" font-size="10.5" font-weight="400" fill="{PINK if visible else MUTED}">{status}</tspan></text>')
         seen[index] = (name, status)
-    body.append(f'<text x="26" y="{height - 20}" font-family="{SANS}" font-size="11" fill="{MUTED}">Real positions today, seen from above the Sun.</text>')
+    body.append(f'<text x="26" y="{height - 34}" font-family="{SANS}" font-size="11" fill="{MUTED}">Real positions today, seen from above the Sun.</text><text x="26" y="{height - 20}" font-family="{SANS}" font-size="11" fill="{MUTED}">Uranus and Neptune need binoculars or a telescope.</text>')
     svg("planets.svg", width, height, "".join(body), "Planets tonight: " + ", ".join(f"{name} {status}" for name, status in seen))
 
 
