@@ -171,16 +171,17 @@ def night(width, height, seed, nebulae=True):
     return "".join(parts)
 
 
-def poster(name, rows, label, round_top=False, round_bottom=False):
+def poster(name, rows, label, round_top=False, round_bottom=False, top=24):
     """Lays cards out in rows on the shared sky and writes it as a single image.
 
     Each card sits in its own nested <svg>, which keeps the pixel transform origins its
     animations use relative to the card instead of the whole poster. Only the outer corners
-    of the page are rounded: the posters and the menu between them stack flush.
+    of the page are rounded: the posters and the menu between them stack flush. A poster that
+    continues a row of images above it starts with a smaller top margin, so the gap stays even.
     """
     pad, gap = 24, 16
     width = 840 + 2 * pad
-    y, placed, css = pad, [], []
+    y, placed, css = top, [], []
     for row in rows:
         x, tallest = pad, 0
         for key in row:
@@ -247,6 +248,34 @@ def menu(links):
             html.append(f'<a href="{url}"><img src="assets/{file}" width="{share}%" align="top" alt="{escape(text)}"></a>')
     return "".join(html)
 
+
+def gallery(rows):
+    """The project cards, cut into one image per card so each can link to its repository.
+
+    A poster is a single image and cannot carry links, so the cards sit in slices of the shared
+    sky like the menu buttons: two to a row, each half a row wide, flush with the posters above
+    and below. A row with one card is finished with an empty slice of sky. Returns the README markup.
+    """
+    total, pad, gap = 888, 24, 16
+    html = []
+    for r, row in enumerate(rows):
+        above = pad if r == 0 else gap // 2
+        height = above + max(CARDS[key][1] for key, _ in row) + gap // 2
+        # Two-decimal percentages that stop just short of 100, so rounding can never wrap a row.
+        for i, share in enumerate((50, 49.98)):
+            slice_width = round(total * share / 100, 2)
+            x = pad if i == 0 else gap // 2
+            inner = night(round(slice_width) + 2, height, f"gallery{r}{i}", nebulae=False)
+            if i < len(row):
+                key, url = row[i]
+                w, h, body, css, label = CARDS[key]
+                inner += f'<svg x="{x}" y="{above}" width="{w}" height="{h}" viewBox="0 0 {w} {h}">{body}</svg>'
+                file = write(f"card-{r}-{i}.svg", slice_width, height, inner, label, css)
+                html.append(f'<a href="{url}"><img src="assets/{file}" width="{share}%" align="top" alt="{escape(label)}"></a>')
+            else:
+                file = write(f"card-{r}-{i}.svg", slice_width, height, inner, "")
+                html.append(f'<img src="assets/{file}" width="{share}%" align="top" alt="">')
+    return "".join(html)
 
 def milestones(calendar, repos):
     """How far along the next round numbers are, each as a comet closing in on its target."""
@@ -1292,20 +1321,20 @@ def main():
 
     name = NAME
     top = poster("sky-top.svg", [["header.svg"], ["terminal.svg"]], f"{name}: desktop tools and small universes. " + CARDS["terminal.svg"][4], round_top=True)
-    cards = [f"repo-{repo['name']}.svg" for repo in repos]
-    rows = [cards[index:index + 2] for index in range(0, len(cards), 2)]
-    rows += [["orbits.svg", "moon.svg"], ["galaxy.svg", "signal.svg"], ["blackhole.svg", "radar.svg"], ["hours.svg", "logbook.svg"], ["earth.svg", "meteors.svg"], ["daylight.svg", "planets.svg"]]
+    cards = [(f"repo-{repo['name']}.svg", repo["url"]) for repo in repos]
+    projects = gallery([cards[index:index + 2] for index in range(0, len(cards), 2)])
+    rows = [["orbits.svg", "moon.svg"], ["galaxy.svg", "signal.svg"], ["blackhole.svg", "radar.svg"], ["hours.svg", "logbook.svg"], ["earth.svg", "meteors.svg"], ["daylight.svg", "planets.svg"]]
     rows += [[key] for key in ("control.svg", "mission.svg", "milestones.svg", "sky.svg", "launches.svg", "trail.svg", "ticker.svg", "cargo.svg", "languages.svg", "spectra.svg", "toolkit.svg", "stargazers.svg", "observers.svg", "aurora.svg")]
-    sky_main = poster("sky-main.svg", rows, ". ".join(CARDS[key][4].rstrip(". ") for row in rows for key in row), round_bottom=True)
+    sky_main = poster("sky-main.svg", rows, ". ".join(CARDS[key][4].rstrip(". ") for row in rows for key in row), round_bottom=True, top=8)
 
-    # The menu carries the links, since a poster is a single image. One button per repository, added automatically.
+    # The menu and the project cards carry the links, since a poster is a single image. One button and card per repository, added automatically.
     links = [(DISCORD[0], DISCORD[1], True)] + [(repo["name"], repo["url"], False) for repo in repos]
     # One paragraph with no whitespace between the tags: any gap would let the page show through.
     readme = (
         f'<p><img src="assets/{top}" width="100%" align="top" alt="{escape(name)}: desktop tools and small universes">'
-        f"{menu(links)}"
-        f'<img src="assets/{sky_main}" width="100%" align="top" alt="Projects, orbits, tonight\'s moon and planets, Istanbul daylight, a contribution galaxy, streaks, milestones, recent releases and commits, drawn as one night sky"></p>\n\n'
-        '<sub>The sky and every button are SVGs drawn by <a href="build.py"><code>build.py</code></a> from the GitHub API and redrawn every three hours: a new repository gets its own card, planet, radar blip and menu button without any editing.</sub>'
+        f"{menu(links)}{projects}"
+        f'<img src="assets/{sky_main}" width="100%" align="top" alt="Orbits, tonight\'s moon and planets, Istanbul daylight, a contribution galaxy, streaks, milestones, recent releases and commits, drawn as one night sky"></p>\n\n'
+        '<sub>The sky, every card and every button are SVGs drawn by <a href="build.py"><code>build.py</code></a> from the GitHub API and redrawn every three hours: a new repository gets its own linked card, planet, radar blip and menu button without any editing.</sub>'
         f'<img src="{COUNTER}&amp;style=pixel" alt="">\n'
     )
     (Path(__file__).parent / "README.md").write_text(readme, encoding="utf-8", newline="\n")
