@@ -27,6 +27,7 @@ SANS = "'Segoe UI', system-ui, -apple-system, sans-serif"
 MONO = "ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace"
 SERIF = "Georgia, 'Times New Roman', serif"
 PINK, ROSE, TEXT, MUTED, LINE = "#f0abc5", "#e7a0b9", "#f5f5f6", "#a48a97", "#5a2a40"
+VIOLET = "#bca4dd"
 # Descriptions for repositories whose GitHub description is empty.
 # Shown as the first button. Everything else on the page comes from the GitHub API.
 DISCORD = ("Talk to me on Discord", "https://discordapp.com/users/268797596280160259")
@@ -34,6 +35,9 @@ DISCORD = ("Talk to me on Discord", "https://discordapp.com/users/26879759628016
 # and every redraw reads the total back to draw it in the observers card.
 COUNTER = f"https://komarev.com/ghpvc/?username={LOGIN}"
 VISITS = OUT / "observers.json"  # daily totals, kept in the repository so the card can show a trend
+DOWNLOADS = OUT / "downloads.json"  # the same for release downloads
+# Geomagnetic activity from NOAA's Space Weather Prediction Center: observed and forecast Kp.
+KP_FORECAST = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json"
 SKY = "#150a14"  # the one background colour every image shares, so they join without a seam
 # What the public repositories are built with, per their own READMEs.
 TOOLKIT = ["Rust", "TypeScript", "React", "Tauri 2", "SQLite", "WebGL 2", "GLSL", "Three.js", "C#", "Node.js"]
@@ -49,7 +53,7 @@ QUERY = """query($login: String!, $since: GitTimestamp!) { user(login: $login) {
     name description stargazerCount forkCount url pushedAt createdAt
     defaultBranchRef { target { ... on Commit {
       history(first: 40) { nodes { messageHeadline committedDate } }
-      pulse: history(first: 100, since: $since) { nodes { committedDate } } } } }
+      pulse: history(first: 100, since: $since) { nodes { committedDate additions deletions } } } } }
     releases(first: 30, orderBy: {field: CREATED_AT, direction: DESC}) { totalCount nodes { tagName publishedAt } }
     primaryLanguage { name color }
     languages(first: 10, orderBy: {field: SIZE, direction: DESC}) { edges { size node { name color } } } } } } }"""
@@ -114,6 +118,8 @@ def fetch():
         repo["pullRequests"] = {"totalCount": pulls}
         repo["issues"] = {"totalCount": None if pulls is None or opened is None else max(opened - pulls, 0)}
         repo["stargazers"] = {"edges": [{"starredAt": fan["starred_at"], "node": {"login": fan["user"]["login"]}} for fan in fans[-6:]]}
+        releases = attempt(f"{repo['name']} downloads", lambda: api(f"{base}/releases?per_page=100")) if repo["releases"]["totalCount"] else []
+        repo["downloads"] = None if releases is None else sum(asset["download_count"] for release in releases for asset in release.get("assets", []))
     return user
 
 
@@ -727,18 +733,64 @@ def mission(calendar, today):
     svg("mission.svg", width, height, "".join(body), f"Last 30 days: current streak {current} days, longest streak {longest} days, last contribution {last}", css)
 
 
-def aurora():
-    """A closing band of slow aurora light. Decorative."""
-    width, height, period = 840, 96, 280
+def space_weather(now):
+    """The planetary Kp index now and its highest forecast value over the next three days.
+
+    NOAA serves the readings either as rows under a header row or as a list of objects, so both
+    are read. Returns None when nothing usable comes back.
+    """
+    data = send(urllib.request.Request(KP_FORECAST, headers={"User-Agent": LOGIN}))
+    if data and isinstance(data[0], list):
+        header = [str(name).lower() for name in data[0]]
+        rows = [dict(zip(header, row)) for row in data[1:]]
+    else:
+        rows = [{str(key).lower(): value for key, value in row.items()} for row in data]
+    readings = []
+    for row in rows:
+        value = next((row[key] for key in ("kp", "kp_index", "estimated_kp") if row.get(key) not in (None, "")), None)
+        if row.get("time_tag") and value is not None:
+            moment = datetime.fromisoformat(str(row["time_tag"]).replace("Z", "").replace(" ", "T")).replace(tzinfo=timezone.utc)
+            readings.append((moment, float(value)))
+    readings.sort()
+    past = [kp for moment, kp in readings if moment <= now]
+    ahead = [kp for moment, kp in readings if now < moment <= now + timedelta(days=3)]
+    if not past:
+        return None
+    return past[-1], max(ahead + past[-1:])
+
+
+def aurora(weather):
+    """The closing band of aurora light, as bright and as restless as the geomagnetic field is tonight.
+
+    The band follows NOAA's Kp index: at a quiet Kp it is a faint rose ribbon, and as a storm builds
+    it grows taller, faster and turns aurora green. Without a reading it stays a quiet ribbon.
+    """
+    width, height, period = 840, 126, 280
+    kp, peak = weather or (0.0, 0.0)
+    storm = min(1.0, kp / 9)
+    colors = [("#bca4dd", 62, 13, 19), (PINK, 54, 17, 13), ("#ffe1ea", 68, 9, 27)]
+    if kp >= 5:  # a storm (G1 or stronger) brings in the green of real aurora
+        colors.insert(1, ("#7fd6a4", 58, 15, 11))
     body = []
     body.append(f'<clipPath id="band"><rect x="1" y="1" width="{width - 2}" height="{height - 2}" rx="15"/></clipPath><g clip-path="url(#band)">')
-    for index, (color, base, swing, speed) in enumerate((("#bca4dd", 62, 13, 19), (PINK, 54, 17, 13), ("#ffe1ea", 68, 9, 27))):
-        points = " ".join(f"{x},{base + swing * math.sin(2 * math.pi * x / period + index):.1f}" for x in range(-period, width + period + 1, 14))
-        body.append(f'<polyline class="drift" points="{points}" fill="none" stroke="{color}" stroke-width="{10 - index * 3}" stroke-linecap="round" opacity="{0.16 + index * 0.07:.2f}" style="animation-duration:{speed}s"/>')
+    for index, (color, base, swing, speed) in enumerate(colors):
+        lift, low = swing * (1 + 0.6 * storm), base + 10 * storm  # a taller band also sinks, clear of the title
+        points = " ".join(f"{x},{low + lift * math.sin(2 * math.pi * x / period + index):.1f}" for x in range(-period, width + period + 1, 14))
+        body.append(f'<polyline class="drift" points="{points}" fill="none" stroke="{color}" stroke-width="{10 - index * 2.5:.1f}" stroke-linecap="round" opacity="{min(0.85, (0.16 + index * 0.07) * (1 + 1.6 * storm)):.2f}" style="animation-duration:{speed * (1 - 0.45 * storm):.1f}s"/>')
     body.append("</g>")
-    body.append(f'<text x="{width / 2}" y="44" text-anchor="middle" font-family="{SERIF}" font-size="21" font-style="italic" fill="{TEXT}">clear skies.</text>')
+    title = "clear skies." if kp < 5 else "the sky is restless."
+    body.append(f'<text x="{width / 2}" y="40" text-anchor="middle" font-family="{SERIF}" font-size="21" font-style="italic" fill="{TEXT}">{title}</text>')
+    if weather:
+        state = "quiet" if kp < 4 else "unsettled" if kp < 5 else f"storm G{min(5, int(kp) - 4)}"
+        # Istanbul sits near 41° N; auroras reach that far south only in the strongest storms.
+        chance = "aurora likely low in the north" if peak >= 9 else "aurora possible low on the northern horizon" if peak >= 8 else "only long-exposure cameras might catch it" if peak >= 7 else "no aurora from Istanbul"
+        line = f"Kp {kp:.1f} now · {state} · next 3 days up to Kp {peak:.0f} · {chance}"
+        body.append(f'<text x="{width / 2}" y="{height - 16}" text-anchor="middle" font-family="{MONO}" font-size="10.5" fill="{MUTED}">{line}</text>')
+        label = f"{title.capitalize()} Geomagnetic activity: {line}"
+    else:
+        label = title.capitalize()
     css = f"@keyframes drift{{to{{transform:translateX({period}px)}}}}.drift{{animation:drift linear infinite}}@media(prefers-reduced-motion:reduce){{.drift{{animation:none}}}}"
-    svg("aurora.svg", width, height, "".join(body), "Clear skies.", css)
+    svg("aurora.svg", width, height, "".join(body), label, css)
 
 
 def all_commits(repos):
@@ -1034,6 +1086,194 @@ def planets(now):
     svg("planets.svg", width, height, "".join(body), "Planets tonight: " + ", ".join(f"{name} {status}" for name, status in seen))
 
 
+# Bright stars, J2000: name, right ascension (hours), declination (degrees), magnitude.
+STARS = {
+    "Polaris": (2.530, 89.26, 2.0), "Yildun": (17.537, 86.59, 4.4), "Epsilon UMi": (16.766, 82.04, 4.2), "Zeta UMi": (15.734, 77.79, 4.3),
+    "Eta UMi": (16.292, 75.76, 5.0), "Kochab": (14.845, 74.16, 2.1), "Pherkad": (15.346, 71.83, 3.0),
+    "Dubhe": (11.062, 61.75, 1.8), "Merak": (11.031, 56.38, 2.4), "Phecda": (11.897, 53.69, 2.4), "Megrez": (12.257, 57.03, 3.3),
+    "Alioth": (12.901, 55.96, 1.8), "Mizar": (13.399, 54.93, 2.2), "Alkaid": (13.792, 49.31, 1.9),
+    "Caph": (0.153, 59.15, 2.3), "Schedar": (0.675, 56.54, 2.2), "Gamma Cas": (0.945, 60.72, 2.2), "Ruchbah": (1.430, 60.24, 2.7), "Segin": (1.907, 63.67, 3.4),
+    "Alderamin": (21.310, 62.59, 2.5), "Eltanin": (17.943, 51.49, 2.2), "Rastaban": (17.507, 52.30, 2.8),
+    "Deneb": (20.690, 45.28, 1.25), "Sadr": (20.370, 40.26, 2.2), "Albireo": (19.512, 27.96, 3.1), "Gienah": (20.770, 33.97, 2.5), "Delta Cyg": (19.750, 45.13, 2.9),
+    "Vega": (18.616, 38.78, 0.03), "Sheliak": (18.835, 33.36, 3.5), "Sulafat": (18.983, 32.69, 3.2),
+    "Altair": (19.846, 8.87, 0.77), "Tarazed": (19.771, 10.61, 2.7), "Alshain": (19.922, 6.41, 3.7),
+    "Markab": (23.079, 15.21, 2.5), "Scheat": (23.063, 28.08, 2.4), "Algenib": (0.221, 15.18, 2.8), "Alpheratz": (0.140, 29.09, 2.1),
+    "Mirach": (1.162, 35.62, 2.1), "Almach": (2.065, 42.33, 2.2), "Hamal": (2.120, 23.46, 2.0), "Diphda": (0.727, -17.99, 2.0),
+    "Mirfak": (3.405, 49.86, 1.8), "Algol": (3.136, 40.96, 2.1), "Pleiades": (3.791, 24.11, 1.6),
+    "Capella": (5.278, 46.00, 0.08), "Menkalinan": (5.992, 44.95, 1.9), "Theta Aur": (5.995, 37.21, 2.6), "Hassaleh": (4.950, 33.17, 2.7), "Elnath": (5.438, 28.61, 1.65),
+    "Aldebaran": (4.599, 16.51, 0.87), "Betelgeuse": (5.919, 7.41, 0.5), "Rigel": (5.242, -8.20, 0.13), "Bellatrix": (5.419, 6.35, 1.6),
+    "Saiph": (5.796, -9.67, 2.1), "Alnitak": (5.680, -1.94, 1.8), "Alnilam": (5.604, -1.20, 1.7), "Mintaka": (5.533, -0.30, 2.2),
+    "Castor": (7.577, 31.89, 1.6), "Pollux": (7.755, 28.03, 1.15), "Procyon": (7.655, 5.22, 0.34),
+    "Sirius": (6.752, -16.72, -1.46), "Mirzam": (6.378, -17.96, 2.0), "Adhara": (6.977, -28.97, 1.5), "Wezen": (7.140, -26.39, 1.8),
+    "Regulus": (10.140, 11.97, 1.35), "Algieba": (10.333, 19.84, 2.0), "Zosma": (11.235, 20.52, 2.6), "Denebola": (11.818, 14.57, 2.1), "Chertan": (11.237, 15.43, 3.3),
+    "Arcturus": (14.261, 19.18, -0.05), "Izar": (14.750, 27.07, 2.4), "Nekkar": (15.033, 40.39, 3.5), "Seginus": (14.535, 38.31, 3.0),
+    "Alphecca": (15.578, 26.71, 2.2), "Rasalhague": (17.582, 12.56, 2.1), "Spica": (13.420, -11.16, 0.97),
+    "Dschubba": (16.006, -22.62, 2.3), "Antares": (16.490, -26.43, 1.0), "Shaula": (17.560, -37.10, 1.6),
+    "Kaus Australis": (18.403, -34.38, 1.8), "Kaus Media": (18.350, -29.83, 2.7), "Nunki": (18.921, -26.30, 2.0), "Ascella": (19.044, -29.88, 2.6),
+    "Fomalhaut": (22.961, -29.62, 1.16),
+}
+# Stick figures, as runs of stars joined in order.
+FIGURES = {
+    "Ursa Major": [["Dubhe", "Merak", "Phecda", "Megrez", "Dubhe"], ["Megrez", "Alioth", "Mizar", "Alkaid"]],
+    "Ursa Minor": [["Polaris", "Yildun", "Epsilon UMi", "Zeta UMi", "Kochab", "Pherkad", "Eta UMi", "Zeta UMi"]],
+    "Cassiopeia": [["Caph", "Schedar", "Gamma Cas", "Ruchbah", "Segin"]],
+    "Draco": [["Eltanin", "Rastaban"]],
+    "Cygnus": [["Deneb", "Sadr", "Albireo"], ["Delta Cyg", "Sadr", "Gienah"]],
+    "Lyra": [["Vega", "Sheliak", "Sulafat", "Vega"]],
+    "Aquila": [["Tarazed", "Altair", "Alshain"]],
+    "Pegasus": [["Markab", "Scheat", "Alpheratz", "Algenib", "Markab"]],
+    "Andromeda": [["Alpheratz", "Mirach", "Almach"]],
+    "Perseus": [["Algol", "Mirfak"]],
+    "Auriga": [["Capella", "Menkalinan", "Theta Aur", "Elnath", "Hassaleh", "Capella"]],
+    "Taurus": [["Aldebaran", "Elnath"]],
+    "Orion": [["Betelgeuse", "Bellatrix", "Mintaka", "Alnilam", "Alnitak", "Betelgeuse"], ["Mintaka", "Rigel", "Saiph", "Alnitak"]],
+    "Gemini": [["Castor", "Pollux"]],
+    "Canis Major": [["Mirzam", "Sirius", "Adhara", "Wezen", "Sirius"]],
+    "Leo": [["Regulus", "Algieba", "Zosma", "Denebola", "Chertan", "Regulus"]],
+    "Bootes": [["Arcturus", "Izar", "Nekkar", "Seginus", "Arcturus"]],
+    "Scorpius": [["Dschubba", "Antares", "Shaula"]],
+    "Sagittarius": [["Kaus Australis", "Kaus Media", "Nunki", "Ascella", "Kaus Australis"]],
+}
+OBLIQUITY = math.radians(23.4393)
+
+
+def moon_position(moment):
+    """The Moon's right ascension (hours) and declination, from the low-precision series in the
+    Astronomical Almanac (good to a few tenths of a degree)."""
+    t = (moment - datetime(2000, 1, 1, 12, tzinfo=timezone.utc)).total_seconds() / 86400 / 36525
+    sin = lambda degrees: math.sin(math.radians(degrees))
+    longitude = 218.32 + 481267.881 * t + 6.29 * sin(134.9 + 477198.85 * t) - 1.27 * sin(259.2 - 413335.38 * t) + 0.66 * sin(235.7 + 890534.23 * t) + 0.21 * sin(269.9 + 954397.70 * t) - 0.19 * sin(357.5 + 35999.05 * t) - 0.11 * sin(186.6 + 966404.05 * t)
+    latitude = 5.13 * sin(93.3 + 483202.03 * t) + 0.28 * sin(228.2 + 960400.87 * t) - 0.28 * sin(318.3 + 6003.18 * t) - 0.17 * sin(217.6 - 407332.20 * t)
+    lam, beta = math.radians(longitude), math.radians(latitude)
+    vector = (math.cos(beta) * math.cos(lam), math.cos(beta) * math.sin(lam), math.sin(beta))
+    return equatorial(vector)
+
+
+def equatorial(vector):
+    """Right ascension (hours) and declination (degrees) of a direction given in ecliptic coordinates."""
+    x, y, z = vector
+    y, z = y * math.cos(OBLIQUITY) - z * math.sin(OBLIQUITY), y * math.sin(OBLIQUITY) + z * math.cos(OBLIQUITY)
+    return math.degrees(math.atan2(y, x)) % 360 / 15, math.degrees(math.asin(z / math.hypot(x, y, z)))
+
+
+def horizon(ra, dec, sidereal):
+    """Altitude and azimuth (degrees, azimuth from north through east) seen from Istanbul."""
+    hour = math.radians(sidereal - ra * 15)
+    lat, d = math.radians(LATITUDE), math.radians(dec)
+    altitude = math.asin(math.sin(lat) * math.sin(d) + math.cos(lat) * math.cos(d) * math.cos(hour))
+    azimuth = math.atan2(-math.cos(d) * math.sin(hour), math.sin(d) * math.cos(lat) - math.cos(d) * math.sin(lat) * math.cos(hour))
+    return math.degrees(altitude), math.degrees(azimuth) % 360
+
+
+def compass(azimuth):
+    return ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][round(azimuth / 45) % 8]
+
+
+def night_sky(now):
+    """The sky over Istanbul at ten tonight: bright stars, their figures, the planets and the Moon.
+
+    A chart as if lying on your back with your head to the north: the zenith in the middle, the
+    horizon round the edge, north at the top and east on the left.
+    """
+    width, height = 840, 320
+    local = (now + timedelta(hours=UTC_OFFSET)).date()
+    moment = datetime(local.year, local.month, local.day, 22, tzinfo=timezone.utc) - timedelta(hours=UTC_OFFSET)
+    days = (moment - datetime(2000, 1, 1, 12, tzinfo=timezone.utc)).total_seconds() / 86400
+    sidereal = (280.46061837 + 360.98564736629 * days + LONGITUDE) % 360
+    cx, cy, radius = 650, 162, 128
+
+    def place(altitude, azimuth):
+        reach = radius * (90 - altitude) / 90
+        return round(cx - reach * math.sin(math.radians(azimuth)), 1), round(cy - reach * math.cos(math.radians(azimuth)), 1)
+
+    seen = {name: horizon(ra, dec, sidereal) for name, (ra, dec, _) in STARS.items()}
+    body = [backdrop(width, height)]
+    body.append(f'<defs><radialGradient id="dome"><stop offset=".6" stop-color="#2a1430" stop-opacity=".55"/><stop offset="1" stop-color="#3a1a34" stop-opacity=".85"/></radialGradient><clipPath id="sky"><circle cx="{cx}" cy="{cy}" r="{radius}"/></clipPath></defs>')
+    body.append(f'<circle cx="{cx}" cy="{cy}" r="{radius}" fill="url(#dome)" stroke="{PINK}" stroke-opacity=".45"/>')
+    for altitude in (30, 60):
+        body.append(f'<circle cx="{cx}" cy="{cy}" r="{radius * (90 - altitude) / 90:.1f}" fill="none" stroke="{PINK}" stroke-opacity=".1" stroke-dasharray="2 5"/>')
+    for label, azimuth in (("N", 0), ("E", 90), ("S", 180), ("W", 270)):
+        x, y = place(-9, azimuth)
+        body.append(f'<text x="{x}" y="{y + 3.5}" text-anchor="middle" font-family="{MONO}" font-size="10" fill="{MUTED}">{label}</text>')
+    chart, labels, taken, figures = [], [], [], []
+
+    def label(x, y, text, size, style, beside=0):
+        """Puts a label next to (x, y) where it overlaps no other label and stays inside the dome.
+
+        beside is the gap to the right of a mark; a mark in the right part of the dome takes its
+        label on the left instead. Returns False when no free spot is found.
+        """
+        wide = len(text) * size * 0.62
+        flip = beside and x > cx + radius * 0.35
+        for dy in (0, 11, -11, 22, -22):
+            left = x - wide / 2 if not beside else x - beside - wide if flip else x + beside
+            top = y + dy - size
+            box = (left, top, left + wide, top + size + 2)
+            inside = all(math.hypot(px - cx, py - cy) < radius - 2 for px in (box[0], box[2]) for py in (box[1], box[3]))
+            if inside and not any(box[0] < b[2] and b[0] < box[2] and box[1] < b[3] and b[1] < box[3] for b in taken):
+                taken.append(box)
+                labels.append(f'<text x="{left:.1f}" y="{y + dy:.1f}" font-size="{size}" {style}>{text}</text>')
+                return True
+        return False
+
+    for figure, runs in FIGURES.items():
+        up = [name for run in runs for name in run if seen[name][0] > -5]
+        for run in runs:
+            path = " ".join(f"{'M' if index == 0 else 'L'}{x} {y}" for index, (x, y) in enumerate(place(*seen[name]) for name in run))
+            if any(seen[name][0] > 0 for name in run):
+                chart.append(f'<path d="{path}" fill="none" stroke="{ROSE}" stroke-opacity=".38" stroke-width=".9"/>')
+        visible = [place(*seen[name]) for name in dict.fromkeys(up) if seen[name][0] > 3]
+        if len(visible) >= 2:
+            figures.append((figure, sum(p[0] for p in visible) / len(visible), max(p[1] for p in visible) + 13))
+    bright = []
+    for index, (name, (_, _, magnitude)) in enumerate(sorted(STARS.items(), key=lambda item: -item[1][2])):
+        altitude, azimuth = seen[name]
+        if altitude <= 0:
+            continue
+        x, y = place(altitude, azimuth)
+        if magnitude < 1.4:
+            chart.append(sparkle(x, y, round(6 - 1.6 * magnitude, 1), "#fff3f7", 1, f' class="tw" style="animation-delay:-{index % 7 * 0.5:.1f}s"'))
+            bright.append((x, y, name))
+        else:
+            chart.append(f'<circle cx="{x}" cy="{y}" r="{max(0.8, 2.6 - 0.45 * magnitude):.1f}" fill="#ffe1ea" opacity="{max(0.45, 1 - 0.14 * magnitude):.2f}"/>')
+    # The planets and the Moon, where they stand tonight.
+    earth = heliocentric("Earth", moment)
+    bodies = []
+    for name in PLANETS:
+        if name != "Earth":
+            ra, dec = equatorial([p - e for p, e in zip(heliocentric(name, moment), earth)])
+            bodies.append((name, PLANETS[name][2], *horizon(ra, dec, sidereal)))
+    phase = ((moment - datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)).total_seconds() / 86400 % SYNODIC) / SYNODIC
+    lit = (1 - math.cos(2 * math.pi * phase)) / 2
+    bodies.insert(0, ("Moon", "#fff3f7", *horizon(*moon_position(moment), sidereal)))
+    for name, color, altitude, azimuth in bodies:
+        if altitude <= 0:
+            continue
+        x, y = place(altitude, azimuth)
+        size = 7 if name == "Moon" else 4.2 if name in ("Venus", "Jupiter", "Saturn", "Mars") else 3.2
+        chart.append(f'<circle cx="{x}" cy="{y}" r="{size + 4}" fill="{color}" opacity=".15"/><circle cx="{x}" cy="{y}" r="{size}" fill="{color}"/>')
+        label(x, y + 4, name, 10, f'font-family="{SANS}" font-weight="600" fill="{TEXT}"', size + 5)
+    # Labels go in order of importance, so a crowded patch of sky keeps the planets' names.
+    for x, y, name in bright:
+        label(x, y + 3, name, 8.5, f'font-family="{MONO}" fill="#d9bcc8"', 7)
+    for figure, x, y in figures:
+        label(x, y, figure, 9.5, f'font-family="{SERIF}" font-style="italic" fill="{PINK}" opacity=".6"')
+    body.append(f'<g clip-path="url(#sky)">{"".join(chart)}</g>' + "".join(labels))
+    body.append(f'<text x="26" y="38" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">ISTANBUL TONIGHT</text>')
+    body.append(f'<text x="26" y="66" font-family="{SERIF}" font-size="22" font-style="italic" fill="{TEXT}">the sky at 22:00</text>')
+    up = [(name, altitude, azimuth) for name, _, altitude, azimuth in bodies if altitude > 0]
+    rows = [(name, f"{compass(azimuth)} · {altitude:.0f}° up" + (f" · {lit * 100:.0f}% lit" if name == "Moon" else "")) for name, altitude, azimuth in up]
+    overhead = max(((name, seen[name][0]) for name, (_, _, magnitude) in STARS.items() if magnitude < 1.4), key=lambda item: item[1])
+    rows.append((overhead[0], "highest bright star, near the zenith" if overhead[1] > 70 else f"highest bright star, {overhead[1]:.0f}° up"))
+    for index, (name, detail) in enumerate(rows[:8]):
+        y = 102 + index * 22
+        color = next((c for n, c, _, _ in bodies if n == name), "#fff3f7")
+        body.append(f'<circle cx="31" cy="{y - 4}" r="4" fill="{color}"/>')
+        body.append(f'<text x="43" y="{y}" font-family="{SANS}" font-size="12" font-weight="600" fill="{TEXT}">{name}<tspan x="118" font-family="{MONO}" font-size="10.5" font-weight="400" fill="{PINK}">{detail}</tspan></text>')
+    body.append(f'<text x="26" y="{height - 34}" font-family="{SANS}" font-size="11" fill="{MUTED}">Lie back with your head to the north: the middle is straight</text><text x="26" y="{height - 20}" font-family="{SANS}" font-size="11" fill="{MUTED}">up, the edge is the horizon, and east is on the left.</text>')
+    svg("tonight.svg", width, height, "".join(body), f"The sky over Istanbul at 22:00 on {local.strftime('%B %d')}: " + "; ".join(f"{name} {detail}" for name, detail in rows))
+
+
 def cargo(repos):
     """What recent commits were for, judged from keywords in each message."""
     # Checked in order, so "Fix ... and add ..." counts as a fix and a README rewrite as docs.
@@ -1133,23 +1373,123 @@ def read_counter():
     return int(re.findall(r">\s*([\d,]+)\s*<", badge)[-1].replace(",", ""))
 
 
-def observe(now):
-    """Reads the counter and logs today's total; returns the log as {day: visits so far}.
+def daily_log(path, total, now):
+    """Logs today's reading of a running total in a JSON file; returns the log as {day: total so far}.
 
-    The total is komarev.com's own figure. Reading it does not reliably add a visit (the count
-    stood still across several redraws), so nothing is taken off; a total never goes back down.
+    A total never goes back down, and a missing reading leaves the log as it was.
     """
     try:
-        days = json.loads(VISITS.read_text(encoding="utf-8"))["days"]
+        days = json.loads(path.read_text(encoding="utf-8"))["days"]
     except (FileNotFoundError, ValueError, KeyError):
         days = {}
-    raw = attempt("profile views", read_counter)
-    if raw is not None:
+    if total is not None:
         today = (now + timedelta(hours=UTC_OFFSET)).date().isoformat()
-        days[today] = max([raw] + list(days.values()))
+        days[today] = max([total] + list(days.values()))
         days = dict(sorted(days.items())[-90:])
-        VISITS.write_text(json.dumps({"days": days}, indent=1) + "\n", encoding="utf-8", newline="\n")
+        path.write_text(json.dumps({"days": days}, indent=1) + "\n", encoding="utf-8", newline="\n")
     return days
+
+
+def observe(now):
+    """Logs komarev.com's visit total. Reading it does not reliably add a visit (the count stood
+    still across several redraws), so nothing is taken off."""
+    return daily_log(VISITS, attempt("profile views", read_counter), now)
+
+
+def lately(days, today, span=7):
+    """How much a logged running total grew over the last few days, as (growth, caption).
+
+    While the log is younger than that, the growth is counted from its first day instead.
+    """
+    ordered = sorted(days.items())
+    if len(ordered) < 2:
+        return None
+    start = (today - timedelta(days=span)).isoformat()
+    before = [(day, total) for day, total in ordered if day <= start] or ordered[:1]
+    day, total = before[-1]
+    caption = f"in the last {span} days" if day <= start else f"since {date.fromisoformat(day).strftime('%b %d')}"
+    return ordered[-1][1] - total, caption
+
+
+def solar_wind(repos, now):
+    """Lines added and removed across every repository, week by week, as a stream of solar wind."""
+    width, height = 840, 172
+    added, removed = [0] * PULSE_WEEKS, [0] * PULSE_WEEKS
+    for repo in repos:
+        history = ((repo["defaultBranchRef"] or {}).get("target") or {}).get("pulse") or {}
+        for node in history.get("nodes", []):
+            back = (now - when(node["committedDate"])).days // 7
+            if 0 <= back < PULSE_WEEKS:
+                added[PULSE_WEEKS - 1 - back] += node.get("additions") or 0
+                removed[PULSE_WEEKS - 1 - back] += node.get("deletions") or 0
+    body = [backdrop(width, height)]
+    body.append(f'<text x="26" y="34" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">SOLAR WIND</text>')
+    body.append(f'<text x="{width - 28}" y="34" text-anchor="end" font-family="{SANS}" font-size="11" fill="{MUTED}">Lines of code added and removed each week, last {PULSE_WEEKS} weeks.</text>')
+    body.append(f'<text x="26" y="86" font-family="{SANS}" font-size="30" font-weight="700" letter-spacing="-1" fill="{TEXT}">+{sum(added):,}</text>')
+    body.append(f'<text x="26" y="112" font-family="{SANS}" font-size="20" font-weight="700" fill="{VIOLET}">−{sum(removed):,}</text>')
+    net = sum(added) - sum(removed)
+    body.append(f'<text x="26" y="140" font-family="{MONO}" font-size="10.5" fill="{MUTED}">net {"+" if net >= 0 else "−"}{abs(net):,} lines in {PULSE_WEEKS} weeks</text>')
+    left, right, axis, reach = 300, width - 34, 100, 42
+    step = (right - left) / (PULSE_WEEKS - 1)
+    # Square roots keep a quiet week visible next to one that moved a generated file or a lockfile.
+    peak = math.sqrt(max(added + removed + [1]))
+    body.append(f'<clipPath id="wind"><rect x="{left - 16}" y="{axis - reach - 8}" width="{right - left + 32}" height="{2 * reach + 16}"/></clipPath><g clip-path="url(#wind)">')
+    for index in range(12):
+        y = axis - reach + 4 + (index * 5 % 12) * (2 * reach - 8) / 11
+        body.append(f'<path class="gust" d="M{left - 56} {y:.1f}h40" stroke="#ffe1ea" stroke-width="1" stroke-linecap="round" style="animation-duration:{2.4 + index % 4 * 0.7:.1f}s;animation-delay:-{index * 0.53:.2f}s"/>')
+    body.append("</g>")
+    body.append(f'<path d="M{left - 12} {axis + 0.5}H{right + 12}" stroke="{LINE}"/>')
+    for index, (plus, minus) in enumerate(zip(added, removed)):
+        x = round(left + index * step, 1)
+        newest = index == PULSE_WEEKS - 1
+        if plus:
+            bar = 2 + reach * math.sqrt(plus) / peak
+            body.append(f'<rect x="{x - 6}" y="{axis - bar:.1f}" width="12" height="{bar:.1f}" rx="4" fill="{"#ffe1ea" if newest else PINK}" opacity="{1 if newest else 0.75}"><title>+{plus:,}</title></rect>')
+        if minus:
+            bar = 2 + reach * math.sqrt(minus) / peak
+            body.append(f'<rect x="{x - 6}" y="{axis + 1}" width="12" height="{bar:.1f}" rx="4" fill="{VIOLET}" opacity="{0.95 if newest else 0.6}"><title>−{minus:,}</title></rect>')
+        if not plus and not minus:
+            body.append(f'<circle cx="{x}" cy="{axis}" r="1.6" fill="{PINK}" opacity=".4"/>')
+    for index in (0, PULSE_WEEKS - 1):
+        week = (now - timedelta(weeks=PULSE_WEEKS - 1 - index)).date()
+        body.append(f'<text x="{round(left + index * step, 1)}" y="{height - 14}" text-anchor="middle" font-family="{MONO}" font-size="9.5" fill="{MUTED}">{"this week" if index == PULSE_WEEKS - 1 else week.strftime("%b %d")}</text>')
+    css = "@keyframes gust{0%{transform:translateX(0);opacity:0}15%{opacity:.4}85%{opacity:.25}100%{transform:translateX(580px);opacity:0}}.gust{animation:gust linear infinite}@media(prefers-reduced-motion:reduce){.gust{animation:none;opacity:0}}"
+    svg("wind.svg", width, height, "".join(body), f"Solar wind: {sum(added):,} lines added and {sum(removed):,} removed in the last {PULSE_WEEKS} weeks", css)
+
+
+def payload(repos, now):
+    """Release downloads: everything delivered so far, and which projects it went out with."""
+    counted = [(repo["downloads"], repo["name"]) for repo in repos if repo.get("downloads")]
+    known = [repo for repo in repos if repo.get("downloads") is not None]
+    total = sum(count for count, _ in counted) if known else None
+    days = daily_log(DOWNLOADS, total, now)
+    rows = sorted(counted, reverse=True)[:5]
+    width, height = 840, max(132, 62 + len(rows) * 24)
+    body = [backdrop(width, height)]
+    body.append(f'<text x="26" y="34" font-family="{MONO}" font-size="12" letter-spacing="2" fill="{PINK}">PAYLOAD DELIVERED</text>')
+    body.append(f'<text x="{width - 28}" y="34" text-anchor="end" font-family="{SANS}" font-size="11" fill="{MUTED}">Downloads of every release file, all time.</text>')
+    if total is None and days:
+        total = sorted(days.items())[-1][1]
+    if not total:
+        body.append(f'<text x="26" y="84" font-family="{SERIF}" font-size="21" font-style="italic" fill="{TEXT}">{"waiting for the first launch" if total == 0 else "telemetry lost"}</text>')
+        svg("payload.svg", width, height, "".join(body), "Release downloads: none yet" if total == 0 else "Release downloads could not be read")
+        return
+    body.append(f'<text x="26" y="86" font-family="{SANS}" font-size="34" font-weight="700" letter-spacing="-1" fill="{TEXT}">{total:,}</text>')
+    body.append(f'<text x="26" y="108" font-family="{MONO}" font-size="10.5" fill="{MUTED}">downloads delivered</text>')
+    growth = lately(days, (now + timedelta(hours=UTC_OFFSET)).date())
+    if growth:
+        body.append(f'<text x="26" y="126" font-family="{MONO}" font-size="10.5" fill="{PINK}">+{growth[0]:,} {growth[1]}</text>')
+    left, span = 430, 330
+    peak = rows[0][0] if rows else 1
+    for index, (count, name) in enumerate(rows):
+        y = 56 + index * 24
+        reached = max(4, span * count / peak)
+        body.append(f'<text x="{left - 12}" y="{y + 10}" text-anchor="end" font-family="{MONO}" font-size="11.5" fill="{TEXT}">{escape(name[:24])}</text>')
+        body.append(f'<rect class="load" x="{left}" y="{y}" width="{reached:.1f}" height="12" rx="6" fill="{"#ffe1ea" if index == 0 else PINK}" opacity="{1 if index == 0 else 0.75 - index * 0.09:.2f}" style="transform-origin:{left}px {y + 6}px;animation-delay:{index * 0.18:.2f}s"/>')
+        body.append(sparkle(round(left + reached, 1), y + 6, 5, "#fff3f7", 1, f' class="tw" style="animation-delay:-{index * 0.6:.1f}s"'))
+        body.append(f'<text x="{left + reached + 12:.1f}" y="{y + 10}" font-family="{MONO}" font-size="11" fill="{MUTED}">{count:,}</text>')
+    css = "@keyframes load{0%{transform:scaleX(0)}18%,100%{transform:scaleX(1)}}.load{animation:load 9s cubic-bezier(.2,.8,.2,1) infinite}@media(prefers-reduced-motion:reduce){.load{animation:none}}"
+    svg("payload.svg", width, height, "".join(body), f"Release downloads: {total:,} in all; " + ", ".join(f"{name} {count:,}" for count, name in rows), css)
 
 
 def observers(days, now):
@@ -1303,7 +1643,7 @@ def main():
     ticker(repos, now)
     languages(repos)
     toolkit()
-    aurora()
+    aurora(attempt("space weather", lambda: space_weather(now)))
 
     milestones(calendar, repos)
     hours(repos)
@@ -1313,7 +1653,10 @@ def main():
     earth(now.date())
     daylight(now.date())
     planets(now)
+    night_sky(now)
     cargo(repos)
+    solar_wind(repos, now)
+    payload(repos, now)
     control(repos, now)
     trail(repos, now)
     stargazers(repos)
@@ -1324,7 +1667,7 @@ def main():
     cards = [(f"repo-{repo['name']}.svg", repo["url"]) for repo in repos]
     projects = gallery([cards[index:index + 2] for index in range(0, len(cards), 2)])
     rows = [["orbits.svg", "moon.svg"], ["galaxy.svg", "signal.svg"], ["blackhole.svg", "radar.svg"], ["hours.svg", "logbook.svg"], ["earth.svg", "meteors.svg"], ["daylight.svg", "planets.svg"]]
-    rows += [[key] for key in ("control.svg", "mission.svg", "milestones.svg", "sky.svg", "launches.svg", "trail.svg", "ticker.svg", "cargo.svg", "languages.svg", "spectra.svg", "toolkit.svg", "stargazers.svg", "observers.svg", "aurora.svg")]
+    rows += [[key] for key in ("tonight.svg", "control.svg", "mission.svg", "milestones.svg", "sky.svg", "launches.svg", "trail.svg", "payload.svg", "ticker.svg", "cargo.svg", "wind.svg", "languages.svg", "spectra.svg", "toolkit.svg", "stargazers.svg", "observers.svg", "aurora.svg")]
     sky_main = poster("sky-main.svg", rows, ". ".join(CARDS[key][4].rstrip(". ") for row in rows for key in row), round_bottom=True, top=8)
 
     # The menu and the project cards carry the links, since a poster is a single image. One button and card per repository, added automatically.
@@ -1333,7 +1676,7 @@ def main():
     readme = (
         f'<p><img src="assets/{top}" width="100%" align="top" alt="{escape(name)}: desktop tools and small universes">'
         f"{menu(links)}{projects}"
-        f'<img src="assets/{sky_main}" width="100%" align="top" alt="Orbits, tonight\'s moon and planets, Istanbul daylight, a contribution galaxy, streaks, milestones, recent releases and commits, drawn as one night sky"></p>\n\n'
+        f'<img src="assets/{sky_main}" width="100%" align="top" alt="Orbits, tonight\'s moon and planets, the sky over Istanbul tonight, Istanbul daylight, a contribution galaxy, streaks, milestones, recent releases, downloads and commits, lines of code, visitors and tonight\'s aurora odds, drawn as one night sky"></p>\n\n'
         '<sub>The sky, every card and every button are SVGs drawn by <a href="build.py"><code>build.py</code></a> from the GitHub API and redrawn every three hours: a new repository gets its own linked card, planet, radar blip and menu button without any editing.</sub>'
         f'<img src="{COUNTER}&amp;style=pixel" alt="">\n'
     )
