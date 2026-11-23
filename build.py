@@ -1679,6 +1679,7 @@ def main():
         f'<img src="assets/{sky_main}" width="100%" align="top" alt="Orbits, tonight\'s moon and planets, the sky over Istanbul tonight, Istanbul daylight, a contribution galaxy, streaks, milestones, recent releases, downloads and commits, lines of code, visitors and tonight\'s aurora odds, drawn as one night sky"></p>\n\n'
         '<sub>The sky, every card and every button are SVGs drawn by <a href="build.py"><code>build.py</code></a> from the GitHub API and redrawn every three hours: a new repository gets its own linked card, planet, radar blip and menu button without any editing.</sub>'
         f'<img src="{COUNTER}&amp;style=pixel" alt="">\n'
+        '\n## License\n\nProject-owned code and original material in this revision are licensed under [GNU GPL v3.0](LICENSE) (GPL-3.0-only). Third-party code, fonts, imagery, data, and brand assets retain their own terms and attributions. [Previous license and copyright notice](licenses/previous-license.txt).\n'
     )
     (Path(__file__).parent / "README.md").write_text(readme, encoding="utf-8", newline="\n")
     print("drew", len(CARDS), "cards and", len(links), "menu buttons for", ", ".join(repo["name"] for repo in repos))
