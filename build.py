@@ -44,12 +44,12 @@ TOOLKIT = ["Rust", "TypeScript", "React", "Tauri 2", "SQLite", "WebGL 2", "GLSL"
 FALLBACK = {"samanyolu3d": "Interactive 3D galaxy simulation and procedural galactic visualization in your browser."}
 
 PULSE_WEEKS = 12  # how far back the activity strip on each project card reaches
-QUERY = """query($login: String!, $since: GitTimestamp!) { user(login: $login) {
+QUERY = """query($login: String!, $since: GitTimestamp!, $cursor: String) { user(login: $login) {
   name createdAt followers { totalCount }
   contributionsCollection { contributionCalendar { totalContributions
     weeks { contributionDays { contributionCount date } } } }
-  repositories(first: 50, ownerAffiliations: OWNER, privacy: PUBLIC, isFork: false,
-               orderBy: {field: STARGAZERS, direction: DESC}) { nodes {
+  repositories(first: 10, after: $cursor, ownerAffiliations: OWNER, privacy: PUBLIC, isFork: false,
+               orderBy: {field: STARGAZERS, direction: DESC}) { pageInfo { hasNextPage endCursor } nodes {
     name description stargazerCount forkCount url pushedAt createdAt
     defaultBranchRef { target { ... on Commit {
       history(first: 40) { nodes { messageHeadline committedDate } }
@@ -99,15 +99,28 @@ def attempt(label, call):
 def fetch():
     token = os.environ.get("GITHUB_TOKEN")
     since = (datetime.now(timezone.utc) - timedelta(weeks=PULSE_WEEKS)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if not token:  # local run: let the GitHub CLI handle sign-in
-        out = subprocess.run(["gh", "api", "graphql", "-f", f"query={QUERY}", "-f", f"login={LOGIN}", "-f", f"since={since}"], capture_output=True, text=True, check=True, encoding="utf-8")
-        reply = json.loads(out.stdout)
-    else:
-        body = json.dumps({"query": QUERY, "variables": {"login": LOGIN, "since": since}}).encode()
-        reply = send(urllib.request.Request("https://api.github.com/graphql", body, {"Authorization": f"Bearer {token}", "User-Agent": LOGIN}))
-    if reply.get("errors"):
-        raise SystemExit(f"GitHub refused part of the query: {reply['errors']}")
-    user = reply["data"]["user"]
+    cursor = None
+    repos = []
+    user = None
+    # Commit histories with line counts time out when fetched for every repository at once.
+    while True:
+        body = json.dumps({"query": QUERY, "variables": {"login": LOGIN, "since": since, "cursor": cursor}})
+        if not token:  # local run: let the GitHub CLI handle sign-in
+            out = subprocess.run(["gh", "api", "graphql", "--input", "-"], input=body, capture_output=True, text=True, check=True, encoding="utf-8")
+            reply = json.loads(out.stdout)
+        else:
+            reply = send(urllib.request.Request("https://api.github.com/graphql", body.encode(), {"Authorization": f"Bearer {token}", "User-Agent": LOGIN}))
+        if reply.get("errors"):
+            raise SystemExit(f"GitHub refused part of the query: {reply['errors']}")
+        page = reply["data"]["user"]
+        if user is None:
+            user = page
+        repos.extend(page["repositories"]["nodes"])
+        page_info = page["repositories"]["pageInfo"]
+        if not page_info["hasNextPage"]:
+            break
+        cursor = page_info["endCursor"]
+    user["repositories"]["nodes"] = repos
     # Open issues, pull requests and stargazers come from the REST API; the Actions token cannot
     # read them for other repositories through the GraphQL query above.
     for repo in user["repositories"]["nodes"]:
