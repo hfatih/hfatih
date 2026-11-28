@@ -17,6 +17,24 @@ def page(name, has_next, cursor):
 
 
 class FetchTests(unittest.TestCase):
+    def test_icon_packs_are_hidden_across_pages_for_both_auth_paths(self):
+        for token in ('', 'test-token'):
+            with self.subTest(token=bool(token)):
+                pages = [page('Mineral-Icon-Pack', True, 'cursor-1'),
+                         page('red-neon-gif-pack', True, 'cursor-2'),
+                         page('galaxy-icons-cosmic', True, 'cursor-3'),
+                         page('StarlitDeck', False, 'cursor-4')]
+
+                def api(path, *args):
+                    return {'open_issues_count': 0} if '?' not in path else []
+
+                with patch.dict(build.os.environ, {'GITHUB_TOKEN': token}), patch.object(build, 'send', side_effect=copy.deepcopy(pages)), patch.object(build.subprocess, 'run', side_effect=[unittest.mock.Mock(stdout=json.dumps(item)) for item in pages]), patch.object(build, 'api', side_effect=api) as api_mock:
+                    user = build.fetch()
+
+                self.assertEqual([repo['name'] for repo in user['repositories']['nodes']], ['StarlitDeck'])
+                self.assertTrue(api_mock.call_args_list)
+                self.assertTrue(all(call.args[0].startswith('repos/hfatih/StarlitDeck') for call in api_mock.call_args_list))
+
     def test_all_repository_pages_are_kept_for_both_auth_paths(self):
         for token in ('', 'test-token'):
             with self.subTest(token=bool(token)):
