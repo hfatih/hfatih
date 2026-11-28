@@ -120,7 +120,8 @@ def fetch():
         if not page_info["hasNextPage"]:
             break
         cursor = page_info["endCursor"]
-    user["repositories"]["nodes"] = repos
+    # Keep icon packs out of every profile card, menu button and repository summary.
+    user["repositories"]["nodes"] = [repo for repo in repos if not re.search(r"(?:^|-)icons?(?:-|$)|-gif-pack$", repo["name"], re.IGNORECASE)]
     # Open issues, pull requests and stargazers come from the REST API; the Actions token cannot
     # read them for other repositories through the GraphQL query above.
     for repo in user["repositories"]["nodes"]:
