@@ -17,7 +17,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  source-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest -v test_build
+
   draft:
+    needs: source-tests
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -28,9 +42,8 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       TAG: ${{ inputs.tag }}
-      CI_WORKFLOW: .github/workflows/draw.yml
     steps:
-      - name: Require a version and successful CI on this exact commit
+      - name: Validate the release version
         shell: bash
         run: |
           set -euo pipefail
@@ -38,12 +51,7 @@ jobs:
             echo 'Use a version such as v1.0 or v1.0.0-rc.1.' >&2
             exit 1
           fi
-          conclusion=$(gh api "repos/${GH_REPO}/actions/runs?head_sha=${GITHUB_SHA}&per_page=100" |
-            jq -r --arg path "$CI_WORKFLOW" '[.workflow_runs[] | select(.path == $path)] | first | .conclusion // "missing"')
-          if [[ "$conclusion" != 'success' ]]; then
-            echo "The latest CI for ${GITHUB_SHA} must pass before preparing a release (found: ${conclusion})." >&2
-            exit 1
-          fi
+          # source-tests checks this SHA directly; the draw workflow commits generated assets.
       - name: Generate release notes and create a draft
         shell: bash
         run: |
